@@ -258,12 +258,60 @@ pub struct GrokConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkBuddyConfig {
+    /// agent2api = 走 agent2api 搜索接口（token 由它维护）；direct = 直连上游并回退 agent2api
+    #[serde(default)]
+    pub mode: WorkBuddyMode,
+    /// agent2api 模式：搜索接口地址与 key；direct 模式下作为回退通道
+    #[serde(default)]
     pub base_url: String,
+    #[serde(default)]
     pub api_key: String,
+    /// direct 模式：agent2api 的账号库与 AES 密钥（只读挂载）
+    #[serde(default = "default_workbuddy_db_path")]
+    pub db_path: String,
+    #[serde(default = "default_workbuddy_key_path")]
+    pub key_path: String,
+    #[serde(default = "default_workbuddy_provider")]
+    pub provider: String,
+    /// direct 模式：上游单次条数（服务端硬上限 10）
+    #[serde(default = "default_workbuddy_max_results")]
+    pub max_results: usize,
+    /// direct 模式：账号缓存秒数，过期后重新读库
+    #[serde(default = "default_workbuddy_account_ttl_secs")]
+    pub account_ttl_secs: u64,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+pub enum WorkBuddyMode {
+    #[default]
+    #[serde(rename = "agent2api")]
+    Agent2Api,
+    #[serde(rename = "direct")]
+    Direct,
+}
+
+fn default_workbuddy_db_path() -> String {
+    "/agent2api/agent2api.db".to_string()
+}
+
+fn default_workbuddy_key_path() -> String {
+    "/agent2api/account.key".to_string()
+}
+
+fn default_workbuddy_provider() -> String {
+    "workbuddy".to_string()
+}
+
+fn default_workbuddy_max_results() -> usize {
+    10
+}
+
+fn default_workbuddy_account_ttl_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]

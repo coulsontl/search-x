@@ -2,7 +2,7 @@
 
 轻量级多渠道搜索聚合网关：一个 Rust 单二进制，同时提供 **MCP** 和 **REST** 接口。
 
-- 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（走 agent2api）
+- 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（agent2api 或直连）
 - 每个渠道支持**多个 key 轮询**与失败冷却，**base URL 可自定义**（便于走反代）
 - 三档路由：`fast` / `balanced` / `full`，并行调用、独立超时、失败降级
 - **RRF 融合排序** + URL 归一化去重（保留最长正文），SearXNG 摘要结果统一排最后
@@ -84,7 +84,7 @@ timeout_secs = 15
 | 模式 | 渠道 | 用途 |
 |---|---|---|
 | `fast` | SearXNG | 免费、最快（约 0.5–0.7s，单次约 20 条） |
-| `balanced` | SearXNG + Exa + Tavily + WorkBuddy（国内版） | 默认编排，四渠道并发、每渠道 20 条；实测合并去重后约 50 条（约 0.5–4s） |
+| `balanced` | SearXNG + Exa + Tavily + WorkBuddy（国内版） | 默认编排，四渠道并发、每渠道 20 条（WorkBuddy 上游上限 5/10 条，视模式而定）；实测合并去重后约 50–65 条（约 0.5–4s） |
 | `full` | 所有已启用渠道（再加 Firecrawl / TinyFish） | 最全，Firecrawl 抓正文慢，适合需要全文时 |
 
 > SearXNG 的 JSON API 没有条数参数，结果数由可用引擎决定（当前实例启用 bing + google cse，单次 28–30 条，翻页不可用）；search-x 按 `limit` 截断。
@@ -180,12 +180,34 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 | TinyFish | ✅ | ✅ | `X-API-Key`；默认未配置 |
 | Firecrawl | ✅ | ✅ | SPA（小黑盒）最强；抓正文较慢 |
 | grok | ✅ | ❌ | 直连 Responses API，仅兜底 |
-| WorkBuddy | ✅ | ❌ | 走 agent2api `/api/web-search/search`，需把 `workbuddy` 加入其 `selection.search` |
+| WorkBuddy | ✅ | ❌ | `mode = "agent2api"` 走 agent2api `/api/web-search/search`（上游固定 5 条）；`mode = "direct"` 旁路读取 agent2api 账号库直连上游（最多 10 条，失败自动回退 agent2api 并记日志） |
+
+### WorkBuddy direct 模式
+
+`direct` 模式不自己维护账号：它只读挂载 agent2api 的数据目录，按 TTL 读取并解密账号库里的 `accessToken` 直连 WorkBuddy 上游；token 刷新仍由 agent2api 负责，search-x 绝不调用 refresh 接口（避免 refresh token 轮换互踢）。
+
+```toml
+[channels.workbuddy]
+mode = "direct"
+base_url = "http://agent2api.example.com:3065"   # 同时作为回退通道
+api_key = "YOUR_AGENT2API_KEY"
+db_path = "/agent2api/agent2api.db"
+key_path = "/agent2api/account.key"
+provider = "workbuddy"
+max_results = 10
+account_ttl_secs = 600
+```
+
+容器需要把 agent2api 数据目录**只读**挂进来（必须整目录，带上 SQLite 的 `-wal`/`-shm`）：
+
+```bash
+-v /path/to/agent2api:/agent2api:ro
+```
 
 ## 开发
 
 ```bash
-cargo test                                  # 18 个单元测试，无网络依赖
+cargo test                                  # 26 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```
@@ -205,12 +227,28 @@ docker build -t search-x .
 docker pull ghcr.io/<owner>/search-x:latest
 
 docker run -d --name search-x -p 127.0.0.1:3088:3088 \
+  --read-only --tmpfs /tmp \
+  --cap-drop=ALL --security-opt=no-new-privileges \
   -v /path/to/config-dir:/config:ro \
   -v /path/to/logs:/logs \
   -e SEARCH_X_CONFIG=/config/config.toml \
   --restart unless-stopped \
   search-x
 ```
+
+## 安全
+
+- **认证默认开启**：支持 `bearer` / `x_api_key` / `both` / `custom` header；key 比较为常量时间；空 key 一律拒绝。
+- **公开探活**只返回 `{"status":"ok"}`，不暴露版本号或渠道清单。
+- **`/fetch` SSRF 防护**：只允许公网 http/https；拒绝内网/回环/链路本地/CGNAT/保留地址与 `.local` 等内网域名；并对域名做一次 DNS 解析，**所有解析结果必须是公网 IP**（阻止 `127.0.0.1.nip.io` 这类绕过）。
+- **WorkBuddy direct 模式**：只读旁路读取 agent2api 账号库，绝不调用 refresh；账号库读取失败只写服务端日志，不把路径/系统错误回给客户端。
+- **公网部署建议**：
+  - 用 nginx/Caddy 反代并启用 TLS，只暴露 `/search`、`/fetch`、`/mcp`；`/reload` 建议仅内网可达；
+  - 反代层加请求频率限制与请求体上限；
+  - 容器只绑定内网地址（`-p 127.0.0.1:3088:3088` 或内网 IP），不要 `-p 0.0.0.0`；
+  - 容器使用 `--read-only`、`--cap-drop=ALL`、`--security-opt=no-new-privileges`；
+  - direct 模式只需挂载 `agent2api.db`、`-wal`、`-shm`、`account.key` 四个文件的专用目录，不要挂载整个 agent2api 数据目录；
+  - 网关本身无文件读取接口：所有请求参数只能到达搜索/抓取渠道，不能指定文件路径。
 
 环境变量：
 

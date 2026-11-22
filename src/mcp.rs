@@ -91,6 +91,10 @@ async fn call_tool(router: &Router, name: &str, arguments: Value, id: Value) -> 
             if queries.is_empty() || queries.len() > 10 {
                 return tool_error(id, "queries 需为 1-10 条");
             }
+            // 与 REST /search 保持同样的长度上限，避免超长 query 打到上游。
+            if queries.iter().any(|query| query.chars().count() > 4000) {
+                return tool_error(id, "单条查询不能超过 4000 字符");
+            }
             let request = SearchRequest {
                 queries,
                 mode: arguments
@@ -131,11 +135,10 @@ async fn call_tool(router: &Router, name: &str, arguments: Value, id: Value) -> 
             if urls.is_empty() || urls.len() > 10 {
                 return tool_error(id, "urls 需为 1-10 个");
             }
-            if let Some(bad) = urls
-                .iter()
-                .find(|url| !crate::url_guard::is_public_http_url(url))
-            {
-                return tool_error(id, format!("仅允许公网 http/https URL: {bad}"));
+            for url in &urls {
+                if !crate::url_guard::is_public_http_url_resolved(url).await {
+                    return tool_error(id, "仅允许公网 http/https URL");
+                }
             }
             let request = FetchRequest {
                 urls,

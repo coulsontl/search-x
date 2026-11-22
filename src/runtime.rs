@@ -9,12 +9,13 @@ use crate::channels::grok::GrokChannel;
 use crate::channels::searxng::SearxngChannel;
 use crate::channels::tavily::TavilyChannel;
 use crate::channels::tinyfish::TinyFishChannel;
-use crate::channels::workbuddy::WorkBuddyChannel;
+use crate::channels::workbuddy::{DirectWorkBuddyChannel, WorkBuddyChannel};
 use crate::channels::Channel;
-use crate::config::{AuthConfig, Config, ProxyConfig};
+use crate::config::{AuthConfig, Config, ProxyConfig, WorkBuddyMode};
 use crate::keypool::KeyPool;
 use crate::logger::SearchLogger;
 use crate::router::Router;
+use crate::workbuddy_accounts::WorkBuddyAccountStore;
 
 pub struct Runtime {
     pub router: Arc<Router>,
@@ -111,11 +112,47 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
 
     if let Some(cfg) = &config.channels.workbuddy {
         if cfg.enabled {
-            adapters.push(Arc::new(WorkBuddyChannel::new(
-                cfg.base_url.clone(),
-                cfg.api_key.clone(),
-                shared_client.clone(),
-            )));
+            // agent2api 通道同时是 direct 模式的回退。
+            let agent2api: Option<Arc<dyn Channel>> = if cfg.base_url.trim().is_empty() {
+                None
+            } else {
+                Some(Arc::new(WorkBuddyChannel::new(
+                    cfg.base_url.clone(),
+                    cfg.api_key.clone(),
+                    shared_client.clone(),
+                )))
+            };
+            match cfg.mode {
+                WorkBuddyMode::Agent2Api => match agent2api {
+                    Some(channel) => adapters.push(channel),
+                    None => {
+                        tracing::warn!("workbuddy 处于 agent2api 模式但 base_url 为空，渠道未启用")
+                    }
+                },
+                WorkBuddyMode::Direct => {
+                    let accounts = Arc::new(WorkBuddyAccountStore::new(
+                        &cfg.db_path,
+                        &cfg.key_path,
+                        cfg.provider.clone(),
+                        cfg.account_ttl_secs,
+                    ));
+                    if agent2api.is_none() {
+                        tracing::warn!("workbuddy direct 模式没有配置 agent2api 回退通道");
+                    }
+                    tracing::info!(
+                        "workbuddy direct 模式: provider={} max_results={} db={}",
+                        cfg.provider,
+                        cfg.max_results.clamp(1, 10),
+                        cfg.db_path
+                    );
+                    adapters.push(Arc::new(DirectWorkBuddyChannel::new(
+                        shared_client.clone(),
+                        accounts,
+                        cfg.max_results,
+                        agent2api,
+                    )));
+                }
+            }
             timeouts.insert("workbuddy".into(), Duration::from_secs(cfg.timeout_secs));
         }
     }

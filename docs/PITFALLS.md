@@ -92,3 +92,16 @@
 - **现象**：`curl --data-binary '{"queries":["中文"]}'` 在某些终端返回 `Request body must be a JSON-RPC 2.0 message`。
 - **根因**：终端编码（GBK/cp936）把中文转成了非 UTF-8 字节。
 - **解决**：把请求体写成 UTF-8 文件，再用 `--data-binary @file`；测试脚本统一用 Python 发请求。
+
+### 16. SSRF 只查字面量不够：`nip.io` 这类域名要解析后再判
+
+- **现象**：`http://127.0.0.1.nip.io/` 的主机名不是 IP 字面量，纯字符串检查会放行。
+- **解决**：`url_guard::is_public_http_url_resolved` 在字面量检查后再做一次 DNS 解析，**所有**解析结果必须是公网 IP；解析失败一律拒绝。REST `/fetch` 与 MCP `web_fetch` 统一走这个函数。
+
+### 17. WorkBuddy direct 模式：账号库挂载要收窄、WAL 要一起挂
+
+- **背景**：direct 模式只读旁路读取 agent2api 的 `agent2api.db` 与 `account.key` 解密 token。
+- **坑 1**：直接挂载整个 agent2api 数据目录会把 `update-token.key`、插件和 wasm 缓存一起暴露给 search-x。应建专用目录，只放 `agent2api.db`、`agent2api.db-wal`、`agent2api.db-shm`、`account.key` 四个文件的硬链接。
+- **坑 2**：SQLite 处于 WAL 模式，只挂主库会读不到最新事务（token 刷新写回后可能看不到）。必须把 `-wal`/`-shm` 一起挂。
+- **坑 3**：硬链接在 `-wal`/`-shm` 被重建（agent2api 重启）后会指向旧 inode；表现是读到的账号数据变旧。重新执行链接命令即可，search-x 侧有 TTL + 401 重读 + agent2api 回退兜底。
+- **坑 4**：容器根文件系统设为 `--read-only` 后，SQLite 只读连接仍能工作（挂载目录本身是 ro），日志目录需单独 rw 挂载。

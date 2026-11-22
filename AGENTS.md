@@ -14,6 +14,7 @@ server.rs          HTTP 路由 + API key 认证 + 请求限制
 mcp.rs             MCP JSON-RPC（initialize / tools/list / tools/call / ping）
 router.rs          路由核心：模式选择渠道、RRF 合并、查询缓存、/fetch 降级
 channels/          渠道适配器（每个文件一个渠道，实现 Channel trait）
+workbuddy_accounts.rs  WorkBuddy direct 模式：只读旁路解密 agent2api 账号库（不刷新 token）
 model.rs           数据模型 + URL 归一/去重/RRF 算法
 cache.rs           进程内查询缓存（TTL + 容量）
 config.rs          config.toml 结构与默认值
@@ -49,7 +50,7 @@ curl -s http://127.0.0.1:3088/health
 - 遵循 KISS：单文件职责单一，不做过度抽象；新增渠道 = 新增 `channels/<name>.rs` + 在 `runtime.rs` 装配
 - 渠道错误统一走 `transport_error` / `status_error`，不把 URL、key、上游响应全文泄漏给客户端
 - 认证比较必须常量时间（`server.rs::constant_time_eq`）
-- 新增用户输入入口时，必须校验数量/长度上限；`/fetch` 的 URL 必须过 `url_guard`
+- 新增用户输入入口时，必须校验数量/长度上限；`/fetch` 的 URL 必须过 `url_guard::is_public_http_url_resolved`（字面量检查 + DNS 解析校验）
 - 改行为必须补测试；改 URL 归一/去重/排序必须更新 `model.rs` 的测试
 
 ## 关键设计
@@ -62,7 +63,8 @@ curl -s http://127.0.0.1:3088/health
 | 缓存 | 进程内 TTL + 容量；key = query + 模式/渠道 + limit；`no_cache: true` 绕过读取但仍写回 |
 | 抓取 | 多 URL 并行；单 URL 按渠道顺序降级；内容 < `min_content_chars` 时继续尝试下一渠道取最长 |
 | 认证 | 默认开启；无 key 时全部拒绝；支持 bearer / x-api-key / both / custom header |
-| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名）、1MB body 上限、查询 ≤10 条且 ≤4000 字符、URL ≤10 个 |
+| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、查询 ≤10 条且 ≤4000 字符（REST 与 MCP 一致）、URL ≤10 个；`/health` 不返回版本；direct 模式错误对客户端脱敏 |
+| 凭据 | `WorkBuddyAccount` 刻意不实现 `Debug`；token 不进入错误响应、日志或缓存 key；direct 只读挂载 4 个文件（db/wal/shm/account.key） |
 | 代理 | 全局 `[proxy]`，`no_proxy` 默认覆盖全部私网段 |
 
 ## 已知坑（详见 docs/PITFALLS.md）
@@ -72,7 +74,7 @@ curl -s http://127.0.0.1:3088/health
 3. **SearXNG 新版默认配置 `bing` 是 disabled**；用 `use_default_settings: true` 时需显式启用
 4. **Exa 对 SPA 可能只返回几百字导航文本**：fetch 必须有"内容过短继续降级"逻辑，否则 Firecrawl 永远没机会
 5. **Tavily 单条正文可达 10 万字符**：必须截断后再返回
-6. **WorkBuddy（agent2api）单次固定最多 5 条**，且同一账号有约 10 秒锁
+6. **WorkBuddy 经 agent2api 单次固定 5 条**；direct 模式直连上游最多 10 条（服务端硬上限），且同一账号有约 10 秒锁。direct 只读账号库、绝不 refresh（刷新权在 agent2api）
 7. **URL 归一不能整串小写**：路径大小写敏感站点会被误合并
 
 ## 配置与部署
@@ -84,11 +86,16 @@ curl -s http://127.0.0.1:3088/health
 ```bash
 docker run -d --name search-x \
   -p 127.0.0.1:3088:3088 \
+  --read-only --tmpfs /tmp \
+  --cap-drop=ALL --security-opt=no-new-privileges \
   -v /path/to/config-dir:/config:ro \
   -v /path/to/logs:/logs \
   --restart unless-stopped \
   ghcr.io/<owner>/search-x:latest
 ```
+
+- direct 模式额外挂载**专用目录**（只含 `agent2api.db`、`agent2api.db-wal`、`agent2api.db-shm`、`account.key` 四个文件的硬链接），不要挂载整个 agent2api 数据目录
+- 公网部署：反代 TLS + 限流，只暴露 `/search`、`/fetch`、`/mcp`；`/reload` 仅内网
 
 - `POST /reload` 重读配置（需认证），修改渠道/key/代理后无需重启；reload 失败只写日志，不把配置片段返回给客户端
 

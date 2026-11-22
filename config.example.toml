@@ -79,9 +79,19 @@ enabled = false
 fallback_only = true
 timeout_secs = 30
 
-# 走 agent2api 的搜索封装；需先把 workbuddy 加入其 selection.search
+# agent2api = 走 agent2api 的搜索封装（token 由它维护，上游固定 5 条；需先把
+#   workbuddy 加入其 selection.search）
+# direct = 直连 WorkBuddy 上游（只读旁路 agent2api 的账号库取 token，最多 10 条；
+#   失败自动回退 agent2api 并记日志）。direct 需要把 agent2api 数据目录只读挂进容器。
 [channels.workbuddy]
+mode = "agent2api"
 base_url = "http://agent2api.example.com:3065"
 api_key = "YOUR_AGENT2API_KEY"
+# direct 模式专用
+db_path = "/agent2api/agent2api.db"
+key_path = "/agent2api/account.key"
+provider = "workbuddy"
+max_results = 10
+account_ttl_secs = 600
 enabled = false
 timeout_secs = 20

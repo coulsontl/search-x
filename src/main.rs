@@ -9,6 +9,7 @@ mod router;
 mod runtime;
 mod server;
 mod url_guard;
+mod workbuddy_accounts;
 
 use std::sync::Arc;
 

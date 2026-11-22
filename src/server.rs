@@ -65,9 +65,9 @@ pub fn build(state: Arc<AppState>) -> AxumRouter {
         .with_state(state)
 }
 
-/// 公开探活：只返回状态，不暴露渠道清单。
+/// 公开探活：只返回状态，不暴露版本号与渠道清单（公网可访问，减少指纹）。
 async fn health() -> Response {
-    Json(json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") })).into_response()
+    Json(json!({ "status": "ok" })).into_response()
 }
 
 /// 重新读取 config.toml 并替换渠道/key/路由/认证配置，无需重启进程。
@@ -141,17 +141,15 @@ async fn fetch(
         )
             .into_response();
     }
-    if let Some(bad) = request
-        .urls
-        .iter()
-        .find(|url| !crate::url_guard::is_public_http_url(url))
-    {
-        tracing::warn!("拒绝非公网 URL: {bad}");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "仅允许公网 http/https URL" })),
-        )
-            .into_response();
+    for url in &request.urls {
+        if !crate::url_guard::is_public_http_url_resolved(url).await {
+            tracing::warn!("拒绝非公网 URL: {url}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "仅允许公网 http/https URL" })),
+            )
+                .into_response();
+        }
     }
     let response = router.fetch(request).await;
     Json(response).into_response()

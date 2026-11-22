@@ -32,6 +32,41 @@ pub fn is_public_http_url(raw: &str) -> bool {
     true
 }
 
+/// 在字符串检查之后再做一次 DNS 解析：所有解析结果都必须是公网 IP。
+/// 用于 /fetch 把 URL 交给第三方抓取前，阻止 `127.0.0.1.nip.io` 这类解析到内网的域名。
+pub async fn is_public_http_url_resolved(raw: &str) -> bool {
+    if !is_public_http_url(raw) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    if host.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    let resolved = tokio::net::lookup_host((host.as_str(), 80)).await;
+    match resolved {
+        Ok(addresses) => {
+            let mut resolved_any = false;
+            for address in addresses {
+                resolved_any = true;
+                if !is_public_ip(address.ip()) {
+                    return false;
+                }
+            }
+            resolved_any
+        }
+        Err(_) => false,
+    }
+}
+
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_ipv4(v4),

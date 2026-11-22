@@ -1,6 +1,6 @@
 [package]
 name = "search-x"
-version = "0.4.1"
+version = "0.5.1"
 edition = "2021"
 description = "Lightweight multi-channel search aggregator with MCP and REST"
 
@@ -17,3 +17,7 @@ url = "2"
 async-trait = "0.1"
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
