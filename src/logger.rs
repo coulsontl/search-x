@@ -47,14 +47,22 @@ impl SearchLogger {
             })).collect::<Vec<_>>(),
             "errors": response.errors,
         });
-        let Ok(line) = serde_json::to_string(&record) else { return };
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.path) {
+        let Ok(line) = serde_json::to_string(&record) else {
+            return;
+        };
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
             let _ = writeln!(file, "{line}");
         }
     }
 
     fn rotate_if_needed(&self) {
-        let Ok(meta) = fs::metadata(&self.path) else { return };
+        let Ok(meta) = fs::metadata(&self.path) else {
+            return;
+        };
         if meta.len() < self.max_bytes {
             return;
         }

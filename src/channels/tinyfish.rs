@@ -14,8 +14,18 @@ pub struct TinyFishChannel {
 }
 
 impl TinyFishChannel {
-    pub fn new(search_url: String, fetch_url: String, keys: KeyPool, client: reqwest::Client) -> Self {
-        Self { client, search_url, fetch_url, keys }
+    pub fn new(
+        search_url: String,
+        fetch_url: String,
+        keys: KeyPool,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            client,
+            search_url,
+            fetch_url,
+            keys,
+        }
     }
 }
 
@@ -29,9 +39,18 @@ impl Channel for TinyFishChannel {
         true
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("tinyfish", "no_key", "TinyFish 没有可用 key"))?;
-        let response = self.client
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("tinyfish", "no_key", "TinyFish 没有可用 key"))?;
+        let response = self
+            .client
             .get(&self.search_url)
             .query(&[("query", query)])
             .header("X-API-Key", &key)
@@ -43,14 +62,22 @@ impl Channel for TinyFishChannel {
                 transport_error("tinyfish", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("tinyfish", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("tinyfish", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("tinyfish", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("tinyfish", "invalid_response", "TinyFish 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new(
+                "tinyfish",
+                "invalid_response",
+                "TinyFish 返回了无法解析的 JSON",
+            )
+        })?;
         Ok(value["results"]
             .as_array()
             .map(|rows| {
@@ -71,10 +98,18 @@ impl Channel for TinyFishChannel {
             .unwrap_or_default())
     }
 
-    async fn fetch(&self, urls: &[String], timeout: Duration) -> Result<Vec<PageResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("tinyfish", "no_key", "TinyFish 没有可用 key"))?;
+    async fn fetch(
+        &self,
+        urls: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<PageResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("tinyfish", "no_key", "TinyFish 没有可用 key"))?;
         let body = json!({ "urls": urls, "format": "markdown" });
-        let response = self.client
+        let response = self
+            .client
             .post(&self.fetch_url)
             .header("X-API-Key", &key)
             .timeout(timeout)
@@ -86,20 +121,32 @@ impl Channel for TinyFishChannel {
                 transport_error("tinyfish", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("tinyfish", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("tinyfish", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("tinyfish", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("tinyfish", "invalid_response", "TinyFish 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new(
+                "tinyfish",
+                "invalid_response",
+                "TinyFish 返回了无法解析的 JSON",
+            )
+        })?;
         let rows = value["results"].as_array().or_else(|| value.as_array());
         Ok(rows
             .map(|rows| {
                 rows.iter()
                     .map(|row| PageResult {
-                        url: row["url"].as_str().or_else(|| row["final_url"].as_str()).unwrap_or_default().to_string(),
+                        url: row["url"]
+                            .as_str()
+                            .or_else(|| row["final_url"].as_str())
+                            .unwrap_or_default()
+                            .to_string(),
                         title: row["title"].as_str().unwrap_or_default().to_string(),
                         content: row["text"].as_str().unwrap_or_default().to_string(),
                         channel: "tinyfish".to_string(),

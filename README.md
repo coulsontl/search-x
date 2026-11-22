@@ -3,10 +3,15 @@
 轻量级多渠道搜索聚合网关：一个 Rust 单二进制，同时提供 **MCP** 和 **REST** 接口。
 
 - 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（走 agent2api）
-- 每个渠道支持**多个 key 轮询**与失败冷却
-- 每个渠道的 **base URL 可自定义**（便于走反代）
-- 内置认证层：多个自定义 API key，支持 `Authorization: Bearer`、`X-API-Key` 或自定义 header
-- 三档路由：`fast` / `balanced` / `full`，并行调用、独立超时、失败降级、URL 去重
+- 每个渠道支持**多个 key 轮询**与失败冷却，**base URL 可自定义**（便于走反代）
+- 三档路由：`fast` / `balanced` / `full`，并行调用、独立超时、失败降级
+- **RRF 融合排序** + URL 归一化去重（保留最长正文），SearXNG 摘要结果统一排最后
+- **查询缓存**（TTL + 容量上限，请求可传 `no_cache` 绕过）
+- **并行抓取**：多个 URL 同时抓，内容过短自动换渠道重试，正文按字符安全截断
+- 认证层：多个自定义 API key，支持 `Authorization: Bearer`、`X-API-Key` 或自定义 header
+- SSRF 防护、请求体/数量/长度限制；JSONL 搜索日志轮转；配置 `POST /reload` 热重载；可选全局出站代理
+
+文档：[AGENTS.md](AGENTS.md)（架构与开发约定）、[docs/PITFALLS.md](docs/PITFALLS.md)（踩坑记录）。
 
 ## 快速开始
 
@@ -121,7 +126,7 @@ POST /mcp
 ```http
 GET /health
 ```
-无需认证，返回已启用渠道列表。
+无需认证，只返回 `{"status":"ok","version":"..."}`（不暴露渠道清单）。
 
 ### 配置热重载
 
@@ -165,8 +170,6 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 - 如果某渠道返回的内容过短（低于 `[fetch] min_content_chars`，默认 500 字符，典型是 SPA 只抓到导航文本），会继续尝试下一个渠道，最终采用内容最长的结果
 - 返回正文按 `[fetch] max_content_chars`（默认 10000 字符）按字符截断（不会切坏中文）
 
-`/fetch` 按 URL **逐个渠道降级**：某个 URL 在 Exa/Tavily 失败后自动尝试 Firecrawl/TinyFish，尽量拿到正文。
-
 ## 渠道说明
 
 | 渠道 | 搜索 | 抓取 | 备注 |
@@ -179,11 +182,40 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 | grok | ✅ | ❌ | 直连 Responses API，仅兜底 |
 | WorkBuddy | ✅ | ❌ | 走 agent2api `/api/web-search/search`，需把 `workbuddy` 加入其 `selection.search` |
 
-## 部署
+## 开发
 
 ```bash
+cargo test                                  # 18 个单元测试，无网络依赖
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings   # CI 同款检查
+```
+
+CI（GitHub Actions）在 push/PR 时运行上述检查；推送到 `main` 或打 `v*` 标签会构建并推送镜像到 GHCR：
+`ghcr.io/<owner>/search-hub:latest`、`:<tag>`、`:sha-<commit>`。
+
+## 部署
+
+> **务必挂载目录，不要挂单个配置文件**：单文件 bind mount 在宿主机编辑保存（rename 换 inode）后，容器内仍指向旧 inode，`POST /reload` 会静默读到旧配置。详见 [docs/PITFALLS.md](docs/PITFALLS.md)。
+
+```bash
+# 本地构建
 docker build -t search-hub .
-docker run -d --name search-hub -p 3088:3088 \
-  -v /path/to/config.toml:/config.toml:ro \
+
+# 或使用 CI 构建的镜像
+docker pull ghcr.io/<owner>/search-hub:latest
+
+docker run -d --name search-hub -p 127.0.0.1:3088:3088 \
+  -v /path/to/config-dir:/config:ro \
+  -v /path/to/logs:/logs \
+  -e SEARCH_HUB_CONFIG=/config/config.toml \
+  --restart unless-stopped \
   search-hub
 ```
+
+环境变量：
+
+| 变量 | 说明 |
+|---|---|
+| `SEARCH_HUB_CONFIG` | 配置文件路径（默认 `config.toml`） |
+| `CLAUDE_CONFIG_PATH` | 可选；grok key 自动导入时读取的 Claude 配置路径（默认 `~/.claude.json`） |
+| `RUST_LOG` | 日志级别（默认 `search_hub=info`） |

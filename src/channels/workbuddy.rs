@@ -28,9 +28,15 @@ impl Channel for WorkBuddyChannel {
         "workbuddy"
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
         let body = json!({ "queries": [query] });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/api/web-search/search", self.base_url))
             .bearer_auth(&self.api_key)
             .timeout(timeout)
@@ -39,12 +45,20 @@ impl Channel for WorkBuddyChannel {
             .await
             .map_err(|error| transport_error("workbuddy", error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("workbuddy", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("workbuddy", error))?;
         if !status.is_success() {
             return Err(status_error("workbuddy", status, &text));
         }
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("workbuddy", "invalid_response", "agent2api 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new(
+                "workbuddy",
+                "invalid_response",
+                "agent2api 返回了无法解析的 JSON",
+            )
+        })?;
         let mut results = Vec::new();
         if let Some(searches) = value["searches"].as_array() {
             for search in searches {

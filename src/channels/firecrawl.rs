@@ -32,15 +32,24 @@ impl Channel for FirecrawlChannel {
         true
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("firecrawl", "no_key", "Firecrawl 没有可用 key"))?;
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("firecrawl", "no_key", "Firecrawl 没有可用 key"))?;
         let body = json!({
             "query": query,
             "limit": limit.clamp(1, 100),
             "sources": ["web"],
             "scrapeOptions": { "formats": ["markdown"], "onlyMainContent": true }
         });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/v2/search", self.base_url))
             .bearer_auth(&key)
             .timeout(timeout)
@@ -52,21 +61,32 @@ impl Channel for FirecrawlChannel {
                 transport_error("firecrawl", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("firecrawl", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("firecrawl", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("firecrawl", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("firecrawl", "invalid_response", "Firecrawl 返回了无法解析的 JSON"))?;
-        let rows = value["data"]["web"].as_array().or_else(|| value["data"].as_array());
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new(
+                "firecrawl",
+                "invalid_response",
+                "Firecrawl 返回了无法解析的 JSON",
+            )
+        })?;
+        let rows = value["data"]["web"]
+            .as_array()
+            .or_else(|| value["data"].as_array());
         Ok(rows
             .map(|rows| {
                 rows.iter()
                     .filter_map(|row| {
                         let url = row["url"].as_str()?.to_string();
-                        let content = row["markdown"].as_str()
+                        let content = row["markdown"]
+                            .as_str()
                             .or_else(|| row["description"].as_str())
                             .unwrap_or_default()
                             .to_string();
@@ -83,12 +103,20 @@ impl Channel for FirecrawlChannel {
             .unwrap_or_default())
     }
 
-    async fn fetch(&self, urls: &[String], timeout: Duration) -> Result<Vec<PageResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("firecrawl", "no_key", "Firecrawl 没有可用 key"))?;
+    async fn fetch(
+        &self,
+        urls: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<PageResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("firecrawl", "no_key", "Firecrawl 没有可用 key"))?;
         let mut pages = Vec::new();
         for url in urls {
             let body = json!({ "url": url, "formats": ["markdown"], "onlyMainContent": true });
-            let response = self.client
+            let response = self
+                .client
                 .post(format!("{}/v2/scrape", self.base_url))
                 .bearer_auth(&key)
                 .timeout(timeout)
@@ -100,18 +128,32 @@ impl Channel for FirecrawlChannel {
                     transport_error("firecrawl", error)
                 })?;
             let status = response.status();
-            let text = response.text().await.map_err(|error| transport_error("firecrawl", error))?;
+            let text = response
+                .text()
+                .await
+                .map_err(|error| transport_error("firecrawl", error))?;
             if !status.is_success() {
                 self.keys.report_failure(&key, Some(status.as_u16()));
                 return Err(status_error("firecrawl", status, &text));
             }
             self.keys.report_success(&key);
-            let value: Value = serde_json::from_str(&text)
-                .map_err(|_| ChannelError::new("firecrawl", "invalid_response", "Firecrawl 返回了无法解析的 JSON"))?;
+            let value: Value = serde_json::from_str(&text).map_err(|_| {
+                ChannelError::new(
+                    "firecrawl",
+                    "invalid_response",
+                    "Firecrawl 返回了无法解析的 JSON",
+                )
+            })?;
             pages.push(PageResult {
                 url: url.clone(),
-                title: value["data"]["metadata"]["title"].as_str().unwrap_or_default().to_string(),
-                content: value["data"]["markdown"].as_str().unwrap_or_default().to_string(),
+                title: value["data"]["metadata"]["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                content: value["data"]["markdown"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 channel: "firecrawl".to_string(),
             });
         }

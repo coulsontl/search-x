@@ -21,13 +21,18 @@ impl KeyPool {
     pub fn new(keys: Vec<String>, strategy: KeyStrategy) -> Self {
         let keys = keys
             .into_iter()
-            .map(|key| KeyState { key, cooldown_until: None, disabled: false, failures: 0 })
+            .map(|key| KeyState {
+                key,
+                cooldown_until: None,
+                disabled: false,
+                failures: 0,
+            })
             .collect();
-        Self { keys: Mutex::new(keys), strategy, cursor: AtomicUsize::new(0) }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.keys.lock().map(|keys| keys.is_empty()).unwrap_or(true)
+        Self {
+            keys: Mutex::new(keys),
+            strategy,
+            cursor: AtomicUsize::new(0),
+        }
     }
 
     /// 取一个当前可用的 key；全部冷却/禁用时返回 None。
@@ -40,7 +45,9 @@ impl KeyPool {
         let available: Vec<usize> = keys
             .iter()
             .enumerate()
-            .filter(|(_, state)| !state.disabled && state.cooldown_until.map_or(true, |until| until <= now))
+            .filter(|(_, state)| {
+                !state.disabled && state.cooldown_until.is_none_or(|until| until <= now)
+            })
             .map(|(index, _)| index)
             .collect();
         if available.is_empty() {
@@ -75,7 +82,9 @@ impl KeyPool {
             if let Some(state) = keys.iter_mut().find(|state| state.key == key) {
                 match status {
                     Some(401) | Some(403) => state.disabled = true,
-                    Some(429) => state.cooldown_until = Some(Instant::now() + Duration::from_secs(60)),
+                    Some(429) => {
+                        state.cooldown_until = Some(Instant::now() + Duration::from_secs(60))
+                    }
                     _ => {
                         state.failures += 1;
                         if state.failures >= 5 {
@@ -86,17 +95,5 @@ impl KeyPool {
                 }
             }
         }
-    }
-
-    pub fn healthy_count(&self) -> usize {
-        let Ok(keys) = self.keys.lock() else { return 0 };
-        let now = Instant::now();
-        keys.iter()
-            .filter(|state| !state.disabled && state.cooldown_until.map_or(true, |until| until <= now))
-            .count()
-    }
-
-    pub fn total_count(&self) -> usize {
-        self.keys.lock().map(|keys| keys.len()).unwrap_or(0)
     }
 }

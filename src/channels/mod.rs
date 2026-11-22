@@ -17,15 +17,32 @@ pub trait Channel: Send + Sync {
     fn supports_fetch(&self) -> bool {
         false
     }
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError>;
-    async fn fetch(&self, _urls: &[String], _timeout: Duration) -> Result<Vec<PageResult>, ChannelError> {
-        Err(ChannelError::new(self.name(), "unsupported", "该渠道不支持抓取"))
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError>;
+    async fn fetch(
+        &self,
+        _urls: &[String],
+        _timeout: Duration,
+    ) -> Result<Vec<PageResult>, ChannelError> {
+        Err(ChannelError::new(
+            self.name(),
+            "unsupported",
+            "该渠道不支持抓取",
+        ))
     }
 }
 
 /// 把 reqwest 错误压成分类型错误，避免把 URL/凭据带进返回。
 pub(crate) fn transport_error(channel: &str, error: reqwest::Error) -> ChannelError {
-    let code = if error.is_timeout() { "timed_out" } else { "transport" };
+    let code = if error.is_timeout() {
+        "timed_out"
+    } else {
+        "transport"
+    };
     ChannelError::new(channel, code, "渠道请求失败")
 }
 

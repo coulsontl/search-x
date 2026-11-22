@@ -32,15 +32,24 @@ impl Channel for TavilyChannel {
         true
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("tavily", "no_key", "Tavily 没有可用 key"))?;
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("tavily", "no_key", "Tavily 没有可用 key"))?;
         let body = json!({
             "query": query,
             "search_depth": "basic",
             "max_results": limit.clamp(1, 20),
             "include_raw_content": true
         });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/search", self.base_url))
             .bearer_auth(&key)
             .timeout(timeout)
@@ -52,21 +61,26 @@ impl Channel for TavilyChannel {
                 transport_error("tavily", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("tavily", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("tavily", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("tavily", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("tavily", "invalid_response", "Tavily 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new("tavily", "invalid_response", "Tavily 返回了无法解析的 JSON")
+        })?;
         Ok(value["results"]
             .as_array()
             .map(|rows| {
                 rows.iter()
                     .filter_map(|row| {
                         let url = row["url"].as_str()?.to_string();
-                        let content = row["raw_content"].as_str()
+                        let content = row["raw_content"]
+                            .as_str()
                             .or_else(|| row["content"].as_str())
                             .unwrap_or_default()
                             .to_string();
@@ -83,10 +97,18 @@ impl Channel for TavilyChannel {
             .unwrap_or_default())
     }
 
-    async fn fetch(&self, urls: &[String], timeout: Duration) -> Result<Vec<PageResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("tavily", "no_key", "Tavily 没有可用 key"))?;
+    async fn fetch(
+        &self,
+        urls: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<PageResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("tavily", "no_key", "Tavily 没有可用 key"))?;
         let body = json!({ "urls": urls });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/extract", self.base_url))
             .bearer_auth(&key)
             .timeout(timeout)
@@ -98,14 +120,18 @@ impl Channel for TavilyChannel {
                 transport_error("tavily", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("tavily", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("tavily", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("tavily", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("tavily", "invalid_response", "Tavily 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new("tavily", "invalid_response", "Tavily 返回了无法解析的 JSON")
+        })?;
         Ok(value["results"]
             .as_array()
             .map(|rows| {

@@ -28,7 +28,10 @@ pub struct AppState {
 impl AppState {
     pub fn new(runtime: Runtime, config_path: String) -> Self {
         Self {
-            inner: RwLock::new(Inner { router: runtime.router, auth: runtime.auth }),
+            inner: RwLock::new(Inner {
+                router: runtime.router,
+                auth: runtime.auth,
+            }),
             config_path,
         }
     }
@@ -85,30 +88,58 @@ async fn reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Respo
     }
 }
 
-async fn search(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(request): Json<SearchRequest>) -> Response {
+async fn search(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SearchRequest>,
+) -> Response {
     let (router, auth) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
     if request.queries.is_empty() || request.queries.len() > 10 {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "queries 需为 1-10 条" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "queries 需为 1-10 条" })),
+        )
+            .into_response();
     }
-    if request.queries.iter().any(|query| query.chars().count() > 4000) {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "单条查询不能超过 4000 字符" }))).into_response();
+    if request
+        .queries
+        .iter()
+        .any(|query| query.chars().count() > 4000)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "单条查询不能超过 4000 字符" })),
+        )
+            .into_response();
     }
     let responses = router.search(request).await;
     Json(responses).into_response()
 }
 
-async fn fetch(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(request): Json<FetchRequest>) -> Response {
+async fn fetch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<FetchRequest>,
+) -> Response {
     let (router, auth) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
     if request.urls.is_empty() || request.urls.len() > 10 {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "urls 需为 1-10 个" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "urls 需为 1-10 个" })),
+        )
+            .into_response();
     }
-    if let Some(bad) = request.urls.iter().find(|url| !crate::url_guard::is_public_http_url(url)) {
+    if let Some(bad) = request
+        .urls
+        .iter()
+        .find(|url| !crate::url_guard::is_public_http_url(url))
+    {
         tracing::warn!("拒绝非公网 URL: {bad}");
         return (
             StatusCode::BAD_REQUEST,
@@ -120,7 +151,11 @@ async fn fetch(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(requ
     Json(response).into_response()
 }
 
-async fn mcp_endpoint(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<serde_json::Value>) -> Response {
+async fn mcp_endpoint(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
     let (router, auth) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
@@ -143,7 +178,11 @@ fn unauthorized(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {
         None
     } else {
         Some(
-            (StatusCode::UNAUTHORIZED, Json(json!({ "error": "invalid api key" }))).into_response(),
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid api key" })),
+            )
+                .into_response(),
         )
     }
 }
@@ -195,7 +234,12 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
 
     fn auth_config(mode: AuthMode) -> AuthConfig {
-        AuthConfig { enabled: true, keys: Vec::new(), mode, custom_header: None }
+        AuthConfig {
+            enabled: true,
+            keys: Vec::new(),
+            mode,
+            custom_header: None,
+        }
     }
 
     #[test]
@@ -212,9 +256,18 @@ mod tests {
         headers.insert("authorization", HeaderValue::from_static("Bearer token-a"));
         headers.insert("x-api-key", HeaderValue::from_static("token-b"));
 
-        assert_eq!(extract_key(&headers, &auth_config(AuthMode::Bearer)).as_deref(), Some("token-a"));
-        assert_eq!(extract_key(&headers, &auth_config(AuthMode::XApiKey)).as_deref(), Some("token-b"));
-        assert_eq!(extract_key(&headers, &auth_config(AuthMode::Both)).as_deref(), Some("token-a"));
+        assert_eq!(
+            extract_key(&headers, &auth_config(AuthMode::Bearer)).as_deref(),
+            Some("token-a")
+        );
+        assert_eq!(
+            extract_key(&headers, &auth_config(AuthMode::XApiKey)).as_deref(),
+            Some("token-b")
+        );
+        assert_eq!(
+            extract_key(&headers, &auth_config(AuthMode::Both)).as_deref(),
+            Some("token-a")
+        );
     }
 
     #[test]

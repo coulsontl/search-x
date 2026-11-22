@@ -7,18 +7,30 @@ const PROTOCOL_VERSION: &str = "2025-03-26";
 
 pub async fn handle(router: &Router, body: Value) -> Value {
     let id = body.get("id").cloned().unwrap_or(Value::Null);
-    let method = body.get("method").and_then(Value::as_str).unwrap_or_default();
+    let method = body
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     match method {
-        "initialize" => ok(id, json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "search-hub", "version": env!("CARGO_PKG_VERSION") }
-        })),
+        "initialize" => ok(
+            id,
+            json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "search-hub", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        ),
         "tools/list" => ok(id, json!({ "tools": tools() })),
         "tools/call" => {
             let params = body.get("params").cloned().unwrap_or(Value::Null);
-            let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let arguments = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             call_tool(router, name, arguments, id).await
         }
         "ping" => ok(id, json!({})),
@@ -64,19 +76,37 @@ async fn call_tool(router: &Router, name: &str, arguments: Value, id: Value) -> 
             let queries = arguments
                 .get("queries")
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             if queries.is_empty() || queries.len() > 10 {
                 return tool_error(id, "queries 需为 1-10 条");
             }
             let request = SearchRequest {
                 queries,
-                mode: arguments.get("mode").and_then(Value::as_str).map(str::to_string),
+                mode: arguments
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 channels: arguments
                     .get("channels")
                     .and_then(Value::as_array)
-                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()),
-                limit: arguments.get("limit").and_then(Value::as_u64).map(|value| value as usize),
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    }),
+                limit: arguments
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
                 no_cache: arguments.get("no_cache").and_then(Value::as_bool),
             };
             let responses = router.search(request).await;
@@ -86,15 +116,27 @@ async fn call_tool(router: &Router, name: &str, arguments: Value, id: Value) -> 
             let urls = arguments
                 .get("urls")
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default();
             if urls.is_empty() || urls.len() > 10 {
                 return tool_error(id, "urls 需为 1-10 个");
             }
-            if let Some(bad) = urls.iter().find(|url| !crate::url_guard::is_public_http_url(url)) {
+            if let Some(bad) = urls
+                .iter()
+                .find(|url| !crate::url_guard::is_public_http_url(url))
+            {
                 return tool_error(id, format!("仅允许公网 http/https URL: {bad}"));
             }
-            let request = FetchRequest { urls, channels: None };
+            let request = FetchRequest {
+                urls,
+                channels: None,
+            };
             let response = router.fetch(request).await;
             tool_result(id, serde_json::to_value(response).unwrap_or(Value::Null))
         }
@@ -111,15 +153,21 @@ fn error(id: Value, code: i64, message: String) -> Value {
 }
 
 fn tool_result(id: Value, payload: Value) -> Value {
-    ok(id, json!({
-        "content": [{ "type": "text", "text": serde_json::to_string(&payload).unwrap_or_default() }],
-        "isError": false
-    }))
+    ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": serde_json::to_string(&payload).unwrap_or_default() }],
+            "isError": false
+        }),
+    )
 }
 
 fn tool_error(id: Value, message: impl Into<String>) -> Value {
-    ok(id, json!({
-        "content": [{ "type": "text", "text": message.into() }],
-        "isError": true
-    }))
+    ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": message.into() }],
+            "isError": true
+        }),
+    )
 }

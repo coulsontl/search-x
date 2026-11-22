@@ -2,14 +2,18 @@ use std::net::IpAddr;
 
 /// 只允许公网 http/https URL，拒绝私网、回环、链路本地、CGNAT、保留地址与内网域名。
 pub fn is_public_http_url(raw: &str) -> bool {
-    let Ok(parsed) = url::Url::parse(raw) else { return false };
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
     if !matches!(parsed.scheme(), "http" | "https") {
         return false;
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return false;
     }
-    let Some(host) = parsed.host_str() else { return false };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty()
         || host == "localhost"

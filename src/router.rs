@@ -33,6 +33,7 @@ pub struct Router {
 }
 
 impl Router {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channels: Vec<Arc<dyn Channel>>,
         fallback: Vec<Arc<dyn Channel>>,
@@ -72,7 +73,11 @@ impl Router {
     }
 
     pub async fn search(&self, request: SearchRequest) -> Vec<SearchResponse> {
-        let mode = request.mode.as_deref().unwrap_or(&self.default_mode).to_string();
+        let mode = request
+            .mode
+            .as_deref()
+            .unwrap_or(&self.default_mode)
+            .to_string();
         let limit = request.limit.unwrap_or(self.default_limit).clamp(1, 100);
         let selected = self.select_channels(&mode, request.channels.as_deref());
         let cache_scope = match request.channels.as_deref() {
@@ -120,14 +125,17 @@ impl Router {
                 request
                     .channels
                     .as_deref()
-                    .map_or(true, |names| names.iter().any(|name| name == channel.name()))
+                    .is_none_or(|names| names.iter().any(|name| name == channel.name()))
             })
             .cloned()
             .collect();
 
         // 多个 URL 并行抓取；单个 URL 内部仍按渠道顺序降级。
         let selected_ref = &selected;
-        let futures = request.urls.iter().map(|url| self.fetch_one(url, selected_ref));
+        let futures = request
+            .urls
+            .iter()
+            .map(|url| self.fetch_one(url, selected_ref));
         let outcomes = join_all(futures).await;
 
         let mut pages = Vec::new();
@@ -150,12 +158,20 @@ impl Router {
                 }
             }
         }
-        FetchResponse { pages, errors, elapsed_ms: started.elapsed().as_millis() as u64 }
+        FetchResponse {
+            pages,
+            errors,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        }
     }
 
     /// 单个 URL：按渠道顺序尝试；内容过短（如 SPA 只抓到 300 字导航文本）时继续尝试下一个，
     /// 最终采用内容最长的结果。内容达到 min_content_chars 即提前停止，避免不必要的付费调用。
-    async fn fetch_one(&self, url: &str, channels: &[Arc<dyn Channel>]) -> Result<Vec<PageResult>, Vec<ChannelError>> {
+    async fn fetch_one(
+        &self,
+        url: &str,
+        channels: &[Arc<dyn Channel>],
+    ) -> Result<Vec<PageResult>, Vec<ChannelError>> {
         let urls = [url.to_string()];
         let mut errors = Vec::new();
         let mut best: Option<Vec<PageResult>> = None;
@@ -164,7 +180,11 @@ impl Router {
             let timeout = self.timeout_of(channel.name());
             match channel.fetch(&urls, timeout).await {
                 Ok(items) if !items.is_empty() => {
-                    let length = items.iter().map(|page| page.content.chars().count()).max().unwrap_or(0);
+                    let length = items
+                        .iter()
+                        .map(|page| page.content.chars().count())
+                        .max()
+                        .unwrap_or(0);
                     if length > best_length {
                         best_length = length;
                         best = Some(items);
@@ -203,7 +223,12 @@ impl Router {
             .collect()
     }
 
-    async fn search_one(&self, query: &str, channels: &[Arc<dyn Channel>], limit: usize) -> SearchResponse {
+    async fn search_one(
+        &self,
+        query: &str,
+        channels: &[Arc<dyn Channel>],
+        limit: usize,
+    ) -> SearchResponse {
         let started = Instant::now();
         let calls = channels.iter().map(|channel| {
             let channel = channel.clone();
@@ -256,7 +281,10 @@ impl Router {
     }
 
     fn timeout_of(&self, name: &str) -> Duration {
-        self.timeouts.get(name).copied().unwrap_or(Duration::from_secs(15))
+        self.timeouts
+            .get(name)
+            .copied()
+            .unwrap_or(Duration::from_secs(15))
     }
 }
 
@@ -380,8 +408,12 @@ mod tests {
     #[tokio::test]
     async fn cache_hit_and_no_cache_bypass() {
         let (channel, search_calls, _) = MockChannel::new("exa", "content");
-        let router =
-            build_router(vec![channel], Some(Arc::new(QueryCache::new(60, 10))), 10000, 500);
+        let router = build_router(
+            vec![channel],
+            Some(Arc::new(QueryCache::new(60, 10))),
+            10000,
+            500,
+        );
 
         let first = router.search(search_request()).await;
         let second = router.search(search_request()).await;
@@ -390,8 +422,12 @@ mod tests {
         assert_eq!(second[0].elapsed_ms, 0);
         assert_eq!(search_calls.load(Ordering::SeqCst), 1);
 
-        let forced =
-            router.search(SearchRequest { no_cache: Some(true), ..search_request() }).await;
+        let forced = router
+            .search(SearchRequest {
+                no_cache: Some(true),
+                ..search_request()
+            })
+            .await;
         assert!(!forced[0].cached);
         assert_eq!(search_calls.load(Ordering::SeqCst), 2);
     }
@@ -403,7 +439,10 @@ mod tests {
         let router = build_router(vec![short, long], None, 2000, 500);
 
         let response = router
-            .fetch(FetchRequest { urls: vec!["https://example.com/".to_string()], channels: None })
+            .fetch(FetchRequest {
+                urls: vec!["https://example.com/".to_string()],
+                channels: None,
+            })
             .await;
         assert_eq!(response.pages.len(), 1);
         assert_eq!(response.pages[0].channel, "firecrawl");
@@ -419,7 +458,10 @@ mod tests {
         let router = build_router(vec![good, later], None, 10000, 500);
 
         let response = router
-            .fetch(FetchRequest { urls: vec!["https://example.com/".to_string()], channels: None })
+            .fetch(FetchRequest {
+                urls: vec!["https://example.com/".to_string()],
+                channels: None,
+            })
             .await;
         assert_eq!(response.pages[0].channel, "exa");
         assert_eq!(good_fetch_calls.load(Ordering::SeqCst), 1);

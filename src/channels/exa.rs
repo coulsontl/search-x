@@ -32,15 +32,24 @@ impl Channel for ExaChannel {
         true
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("exa", "no_key", "Exa 没有可用 key"))?;
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("exa", "no_key", "Exa 没有可用 key"))?;
         let body = json!({
             "query": query,
             "numResults": limit.clamp(1, 100),
             "type": "auto",
             "contents": { "text": { "maxCharacters": 3000 } }
         });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/search", self.base_url))
             .header("x-api-key", &key)
             .timeout(timeout)
@@ -52,21 +61,33 @@ impl Channel for ExaChannel {
                 transport_error("exa", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("exa", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("exa", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("exa", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("exa", "invalid_response", "Exa 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new("exa", "invalid_response", "Exa 返回了无法解析的 JSON")
+        })?;
         Ok(parse_results(&value))
     }
 
-    async fn fetch(&self, urls: &[String], timeout: Duration) -> Result<Vec<PageResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("exa", "no_key", "Exa 没有可用 key"))?;
+    async fn fetch(
+        &self,
+        urls: &[String],
+        timeout: Duration,
+    ) -> Result<Vec<PageResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("exa", "no_key", "Exa 没有可用 key"))?;
         let body = json!({ "urls": urls, "text": { "maxCharacters": 5000 } });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/contents", self.base_url))
             .header("x-api-key", &key)
             .timeout(timeout)
@@ -78,14 +99,18 @@ impl Channel for ExaChannel {
                 transport_error("exa", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("exa", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("exa", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("exa", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("exa", "invalid_response", "Exa 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new("exa", "invalid_response", "Exa 返回了无法解析的 JSON")
+        })?;
         Ok(value["results"]
             .as_array()
             .map(|rows| {

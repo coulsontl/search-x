@@ -26,8 +26,14 @@ impl Channel for SearxngChannel {
         "searxng"
     }
 
-    async fn search(&self, query: &str, limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let response = self.client
+    async fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let response = self
+            .client
             .get(format!("{}/search", self.base_url))
             .query(&[("q", query), ("format", "json")])
             .timeout(timeout)
@@ -35,12 +41,20 @@ impl Channel for SearxngChannel {
             .await
             .map_err(|error| transport_error("searxng", error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("searxng", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("searxng", error))?;
         if !status.is_success() {
             return Err(status_error("searxng", status, &text));
         }
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("searxng", "invalid_response", "SearXNG 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new(
+                "searxng",
+                "invalid_response",
+                "SearXNG 返回了无法解析的 JSON",
+            )
+        })?;
         Ok(value["results"]
             .as_array()
             .map(|rows| {

@@ -42,13 +42,21 @@ impl QueryCache {
         let now = Instant::now();
         entries.retain(|_, entry| entry.expires_at > now);
         if entries.len() >= self.max_entries {
-            if let Some(oldest_key) =
-                entries.iter().min_by_key(|(_, entry)| entry.expires_at).map(|(key, _)| key.clone())
+            if let Some(oldest_key) = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(key, _)| key.clone())
             {
                 entries.remove(&oldest_key);
             }
         }
-        entries.insert(key, CacheEntry { response, expires_at: now + self.ttl });
+        entries.insert(
+            key,
+            CacheEntry {
+                response,
+                expires_at: now + self.ttl,
+            },
+        );
     }
 
     #[cfg(test)]

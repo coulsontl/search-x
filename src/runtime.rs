@@ -25,21 +25,26 @@ const GROK_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// 所有渠道共用一个出站客户端；grok 额外带浏览器 UA（Cloudflare 会拦非浏览器 UA）。
-fn build_http_client(proxy: Option<&ProxyConfig>, user_agent: Option<&str>) -> Result<reqwest::Client, String> {
+fn build_http_client(
+    proxy: Option<&ProxyConfig>,
+    user_agent: Option<&str>,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
     if let Some(user_agent) = user_agent {
         builder = builder.user_agent(user_agent);
     }
     if let Some(proxy) = proxy {
-        let mut http_proxy = reqwest::Proxy::all(&proxy.url)
-            .map_err(|error| format!("proxy.url 无效: {error}"))?;
+        let mut http_proxy =
+            reqwest::Proxy::all(&proxy.url).map_err(|error| format!("proxy.url 无效: {error}"))?;
         if !proxy.no_proxy.trim().is_empty() {
             http_proxy = http_proxy.no_proxy(reqwest::NoProxy::from_string(&proxy.no_proxy));
         }
         builder = builder.proxy(http_proxy);
         tracing::info!("出站代理: {}（no_proxy: {}）", proxy.url, proxy.no_proxy);
     }
-    builder.build().map_err(|error| format!("构建 HTTP 客户端失败: {error}"))
+    builder
+        .build()
+        .map_err(|error| format!("构建 HTTP 客户端失败: {error}"))
 }
 
 pub fn build(config: &Config) -> Result<Runtime, String> {
@@ -51,7 +56,10 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
 
     if let Some(cfg) = &config.channels.searxng {
         if cfg.enabled {
-            adapters.push(Arc::new(SearxngChannel::new(cfg.base_url.clone(), shared_client.clone())));
+            adapters.push(Arc::new(SearxngChannel::new(
+                cfg.base_url.clone(),
+                shared_client.clone(),
+            )));
             timeouts.insert("searxng".into(), Duration::from_secs(cfg.timeout_secs));
         }
     }
@@ -145,7 +153,10 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             config.cache.ttl_secs,
             config.cache.max_entries
         );
-        Some(Arc::new(QueryCache::new(config.cache.ttl_secs, config.cache.max_entries)))
+        Some(Arc::new(QueryCache::new(
+            config.cache.ttl_secs,
+            config.cache.max_entries,
+        )))
     } else {
         None
     };
@@ -184,7 +195,9 @@ pub fn build_from_path(path: &str) -> Result<Runtime, String> {
 
 /// 配置里 grok 没有 key 时，尝试从 Claude Code 的 MCP 配置读取 X-Grok-Api-Key。
 pub fn import_grok_key(config: &mut Config) {
-    let Some(grok) = config.channels.grok.as_mut() else { return };
+    let Some(grok) = config.channels.grok.as_mut() else {
+        return;
+    };
     if !grok.keys.is_empty() {
         return;
     }
@@ -194,8 +207,12 @@ pub fn import_grok_key(config: &mut Config) {
             .unwrap_or_default();
         format!("{home}/.claude.json")
     });
-    let Ok(raw) = std::fs::read_to_string(&path) else { return };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { return };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
     if let Some(key) = value["mcpServers"]["grok-search-rs"]["headers"]["X-Grok-Api-Key"].as_str() {
         grok.keys.push(key.to_string());
         tracing::info!("grok key 已从 {path} 导入");

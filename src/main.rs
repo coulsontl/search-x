@@ -24,7 +24,8 @@ async fn main() {
         )
         .init();
 
-    let config_path = std::env::var("SEARCH_HUB_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+    let config_path =
+        std::env::var("SEARCH_HUB_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let mut config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(error) => {

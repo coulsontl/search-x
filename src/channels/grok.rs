@@ -31,14 +31,23 @@ impl Channel for GrokChannel {
         "grok"
     }
 
-    async fn search(&self, query: &str, _limit: usize, timeout: Duration) -> Result<Vec<SearchResult>, ChannelError> {
-        let key = self.keys.next().ok_or_else(|| ChannelError::new("grok", "no_key", "Grok 没有可用 key"))?;
+    async fn search(
+        &self,
+        query: &str,
+        _limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<SearchResult>, ChannelError> {
+        let key = self
+            .keys
+            .next()
+            .ok_or_else(|| ChannelError::new("grok", "no_key", "Grok 没有可用 key"))?;
         let body = json!({
             "model": self.model,
             "input": [{ "role": "user", "content": [{ "type": "input_text", "text": query }] }],
             "tools": [{ "type": "web_search" }]
         });
-        let response = self.client
+        let response = self
+            .client
             .post(format!("{}/responses", self.base_url))
             .bearer_auth(&key)
             .timeout(timeout)
@@ -50,14 +59,18 @@ impl Channel for GrokChannel {
                 transport_error("grok", error)
             })?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| transport_error("grok", error))?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| transport_error("grok", error))?;
         if !status.is_success() {
             self.keys.report_failure(&key, Some(status.as_u16()));
             return Err(status_error("grok", status, &text));
         }
         self.keys.report_success(&key);
-        let value: Value = serde_json::from_str(&text)
-            .map_err(|_| ChannelError::new("grok", "invalid_response", "Grok 返回了无法解析的 JSON"))?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            ChannelError::new("grok", "invalid_response", "Grok 返回了无法解析的 JSON")
+        })?;
         Ok(parse_sources(&value))
     }
 }

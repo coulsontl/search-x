@@ -28,8 +28,16 @@ pub struct ChannelError {
 }
 
 impl ChannelError {
-    pub fn new(channel: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { channel: channel.into(), code: code.into(), message: message.into() }
+    pub fn new(
+        channel: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            channel: channel.into(),
+            code: code.into(),
+            message: message.into(),
+        }
     }
 }
 
@@ -81,14 +89,34 @@ pub struct FetchRequest {
 
 /// 明确属于跟踪/分享来源的参数；`from`、`source` 这类可能承载业务语义的参数不排除。
 const TRACKING_PARAMS: &[&str] = &[
-    "spm", "scm", "spm_id_from", "fbclid", "gclid", "msclkid", "yclid", "igshid",
-    "mc_cid", "mc_eid", "_hsenc", "_hsmi", "ref_src", "ref_url", "share_token",
-    "share_source", "vd_source", "from_source", "isappinstalled", "mpshare", "chksm",
+    "spm",
+    "scm",
+    "spm_id_from",
+    "fbclid",
+    "gclid",
+    "msclkid",
+    "yclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "_hsenc",
+    "_hsmi",
+    "ref_src",
+    "ref_url",
+    "share_token",
+    "share_source",
+    "vd_source",
+    "from_source",
+    "isappinstalled",
+    "mpshare",
+    "chksm",
 ];
 
 /// 去掉跟踪参数与 fragment，保留原始路径大小写。
 pub fn clean_url(raw: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(raw) else { return raw.to_string() };
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
     let filtered: Vec<(String, String)> = parsed
         .query_pairs()
         .filter(|(key, _)| {
@@ -135,13 +163,23 @@ pub fn rrf_merge(per_channel: Vec<Vec<SearchResult>>) -> Vec<SearchResult> {
         }
     }
 
-    let mut results: Vec<SearchResult> =
-        first_seen_order.into_iter().filter_map(|key| merged.remove(&key)).collect();
+    let mut results: Vec<SearchResult> = first_seen_order
+        .into_iter()
+        .filter_map(|key| merged.remove(&key))
+        .collect();
     // 稳定排序：同分时保持首次出现顺序
     results.sort_by(|left, right| {
-        let left_score = scores.get(&normalize_url(&left.url)).copied().unwrap_or(0.0);
-        let right_score = scores.get(&normalize_url(&right.url)).copied().unwrap_or(0.0);
-        right_score.partial_cmp(&left_score).unwrap_or(std::cmp::Ordering::Equal)
+        let left_score = scores
+            .get(&normalize_url(&left.url))
+            .copied()
+            .unwrap_or(0.0);
+        let right_score = scores
+            .get(&normalize_url(&right.url))
+            .copied()
+            .unwrap_or(0.0);
+        right_score
+            .partial_cmp(&left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     results
 }
@@ -161,8 +199,9 @@ fn merge_item(existing: &mut SearchResult, item: SearchResult) {
 
 /// SearXNG 只返回短摘要，去重合并后统一排到最后；其余渠道保持首次出现顺序。
 pub fn move_searxng_last(results: Vec<SearchResult>) -> Vec<SearchResult> {
-    let (mut primary, searxng): (Vec<SearchResult>, Vec<SearchResult>) =
-        results.into_iter().partition(|item| item.channel != "searxng");
+    let (mut primary, searxng): (Vec<SearchResult>, Vec<SearchResult>) = results
+        .into_iter()
+        .partition(|item| item.channel != "searxng");
     primary.extend(searxng);
     primary
 }
@@ -201,20 +240,36 @@ mod tests {
             clean_url("https://example.com/a?utm_source=x&fbclid=1&id=7#part"),
             "https://example.com/a?id=7"
         );
-        assert_eq!(clean_url("https://example.com/a?spm=abc"), "https://example.com/a");
+        assert_eq!(
+            clean_url("https://example.com/a?spm=abc"),
+            "https://example.com/a"
+        );
     }
 
     #[test]
     fn merges_same_page_across_url_variants() {
         let results = vec![
-            result("Short title", "https://www.example.com/post/?utm_source=a", "短摘要", "searxng"),
-            result("Longer and better title", "http://example.com/post#section", "这是一段更长的正文内容，应该被保留下来。", "exa"),
+            result(
+                "Short title",
+                "https://www.example.com/post/?utm_source=a",
+                "短摘要",
+                "searxng",
+            ),
+            result(
+                "Longer and better title",
+                "http://example.com/post#section",
+                "这是一段更长的正文内容，应该被保留下来。",
+                "exa",
+            ),
         ];
         let merged = rrf_merge(vec![results]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].channel, "searxng");
         assert_eq!(merged[0].title, "Longer and better title");
-        assert_eq!(merged[0].content, "这是一段更长的正文内容，应该被保留下来。");
+        assert_eq!(
+            merged[0].content,
+            "这是一段更长的正文内容，应该被保留下来。"
+        );
     }
 
     #[test]
@@ -225,20 +280,31 @@ mod tests {
             result("Z", "https://z.example.com/", "z", "exa"),
         ];
         let channel_b = vec![
-            result("Z", "https://z.example.com/", "z content much longer", "tavily"),
+            result(
+                "Z",
+                "https://z.example.com/",
+                "z content much longer",
+                "tavily",
+            ),
             result("X", "https://x.example.com/", "x", "tavily"),
             result("W", "https://w.example.com/", "w", "tavily"),
         ];
         let fused = rrf_merge(vec![channel_a, channel_b]);
         let urls: Vec<&str> = fused.iter().map(|item| item.url.as_str()).collect();
         // 分数：x=1/61+1/62 > z=1/63+1/61 > y=1/62 == w=1/62
-        assert_eq!(urls, [
-            "https://x.example.com/",
-            "https://z.example.com/",
-            "https://y.example.com/",
-            "https://w.example.com/",
-        ]);
-        let z = fused.iter().find(|item| item.url == "https://z.example.com/").unwrap();
+        assert_eq!(
+            urls,
+            [
+                "https://x.example.com/",
+                "https://z.example.com/",
+                "https://y.example.com/",
+                "https://w.example.com/",
+            ]
+        );
+        let z = fused
+            .iter()
+            .find(|item| item.url == "https://z.example.com/")
+            .unwrap();
         assert_eq!(z.content, "z content much longer");
         assert_eq!(z.channel, "exa");
     }
