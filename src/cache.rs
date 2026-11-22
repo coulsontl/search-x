@@ -88,6 +88,7 @@ mod tests {
             errors: Vec::new(),
             elapsed_ms: 1,
             cached: false,
+            channel_elapsed_ms: std::collections::HashMap::new(),
         }
     }
 

@@ -103,6 +103,8 @@ impl Router {
                 if let Some(mut response) = cached {
                     response.cached = true;
                     response.elapsed_ms = 0;
+                    // 命中缓存没有发生渠道调用，不把首次耗时当成本次耗时。
+                    response.channel_elapsed_ms.clear();
                     return response;
                 }
                 let response = self.search_one(query, selected_ref, limit).await;
@@ -114,7 +116,8 @@ impl Router {
         });
         let responses = join_all(futures).await;
         if let Some(logger) = &self.logger {
-            for response in responses.iter().filter(|response| !response.cached) {
+            // 缓存命中也要记录（轻量行），用于统计命中率。
+            for response in &responses {
                 logger.log(&mode, response);
             }
         }
@@ -241,14 +244,20 @@ impl Router {
             let query = query.to_string();
             let name = channel.name().to_string();
             let timeout = self.timeout_of(&name);
-            async move { (name, channel.search(&query, limit, timeout).await) }
+            async move {
+                let call_started = Instant::now();
+                let outcome = channel.search(&query, limit, timeout).await;
+                (name, call_started.elapsed().as_millis() as u64, outcome)
+            }
         });
         let outcomes = join_all(calls).await;
 
         let mut per_channel: Vec<Vec<SearchResult>> = Vec::new();
         let mut errors: Vec<ChannelError> = Vec::new();
         let mut used = Vec::new();
-        for (name, outcome) in outcomes {
+        let mut channel_elapsed_ms = HashMap::new();
+        for (name, elapsed_ms, outcome) in outcomes {
+            channel_elapsed_ms.insert(name.clone(), elapsed_ms);
             match outcome {
                 Ok(items) if !items.is_empty() => {
                     used.push(name);
@@ -264,7 +273,13 @@ impl Router {
         if results.is_empty() && !self.fallback.is_empty() {
             for channel in &self.fallback {
                 let timeout = self.timeout_of(channel.name());
-                match channel.search(query, limit, timeout).await {
+                let call_started = Instant::now();
+                let outcome = channel.search(query, limit, timeout).await;
+                channel_elapsed_ms.insert(
+                    channel.name().to_string(),
+                    call_started.elapsed().as_millis() as u64,
+                );
+                match outcome {
                     Ok(items) if !items.is_empty() => {
                         used.push(channel.name().to_string());
                         results = rrf_merge(vec![items]);
@@ -283,6 +298,7 @@ impl Router {
             errors,
             elapsed_ms: started.elapsed().as_millis() as u64,
             cached: false,
+            channel_elapsed_ms,
         }
     }
 
@@ -424,8 +440,16 @@ mod tests {
         let first = router.search(search_request()).await;
         let second = router.search(search_request()).await;
         assert!(!first[0].cached);
+        assert!(
+            first[0].channel_elapsed_ms.contains_key("exa"),
+            "首次搜索应记录每渠道耗时"
+        );
         assert!(second[0].cached);
         assert_eq!(second[0].elapsed_ms, 0);
+        assert!(
+            second[0].channel_elapsed_ms.is_empty(),
+            "缓存命中不应带首次的渠道耗时"
+        );
         assert_eq!(search_calls.load(Ordering::SeqCst), 1);
 
         let forced = router

@@ -28,23 +28,37 @@ impl SearchLogger {
     }
 
     /// 追加一条 JSONL 记录；超过上限时先把当前文件轮转为 `.1`。
+    /// 缓存命中只写轻量行（不重复写结果正文），并带 `cached: true`。
     pub fn log(&self, mode: &str, response: &SearchResponse) {
         let Ok(_guard) = self.lock.lock() else { return };
         self.rotate_if_needed();
+        let results = if response.cached {
+            Vec::new()
+        } else {
+            response
+                .results
+                .iter()
+                .map(|item| {
+                    json!({
+                        "title": item.title,
+                        "url": item.url,
+                        "channel": item.channel,
+                        "published_date": item.published_date,
+                        "content": truncate(&item.content, self.content_chars),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
         let record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "query": response.query,
             "mode": mode,
             "elapsed_ms": response.elapsed_ms,
             "channels": response.channels,
+            "channel_elapsed_ms": response.channel_elapsed_ms,
+            "cached": response.cached,
             "result_count": response.results.len(),
-            "results": response.results.iter().map(|item| json!({
-                "title": item.title,
-                "url": item.url,
-                "channel": item.channel,
-                "published_date": item.published_date,
-                "content": truncate(&item.content, self.content_chars),
-            })).collect::<Vec<_>>(),
+            "results": results,
             "errors": response.errors,
         });
         let Ok(line) = serde_json::to_string(&record) else {

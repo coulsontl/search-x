@@ -60,7 +60,8 @@ curl -s http://127.0.0.1:3088/health
 | 融合排序 | RRF k=60；每个渠道内部顺序即排名；同页跨渠道分数累加 |
 | 去重 | URL 归一（忽略 scheme/www/末尾斜杠/fragment/跟踪参数）+ 最长正文/标题合并；未知 query 参数保留 |
 | SearXNG | 结果只有摘要，统一排最后；JSON API 无条数参数 |
-| 缓存 | 进程内 TTL + 容量；key = query + 模式/渠道 + limit；`no_cache: true` 绕过读取但仍写回 |
+| 缓存 | 进程内 TTL + 容量；key = query + 模式/渠道 + limit；`no_cache: true` 绕过读取但仍写回；命中时清空 `channel_elapsed_ms` |
+| 日志 | JSONL；`channel_elapsed_ms` 记录每渠道耗时（含失败渠道）；`cached: true` 命中写轻量行（results 为空），可统计命中率 |
 | 抓取 | 多 URL 并行；单 URL 按渠道顺序降级；内容 < `min_content_chars` 时继续尝试下一渠道取最长 |
 | 认证 | 默认开启；无 key 时全部拒绝；支持 bearer / x-api-key / both / custom header |
 | 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、查询 ≤10 条且 ≤4000 字符（REST 与 MCP 一致）、URL ≤10 个；`/health` 不返回版本；direct 模式错误对客户端脱敏 |

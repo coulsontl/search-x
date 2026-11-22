@@ -52,6 +52,9 @@ pub struct SearchResponse {
     /// true = 本次响应来自查询缓存
     #[serde(default, skip_serializing_if = "is_false")]
     pub cached: bool,
+    /// 各渠道本次耗时（毫秒）；缓存命中时为空
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub channel_elapsed_ms: HashMap<String, u64>,
 }
 
 fn is_false(value: &bool) -> bool {

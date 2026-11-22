@@ -142,8 +142,12 @@ Authorization: Bearer <api-key>
 
 ```json
 {"ts":"2026-11-22T11:20:00Z","query":"...","mode":"balanced","elapsed_ms":1832,
- "channels":["exa","tavily"],"result_count":19,"results":[...],"errors":[]}
+ "channels":["exa","tavily"],"channel_elapsed_ms":{"exa":1292,"tavily":1820},
+ "cached":false,"result_count":19,"results":[...],"errors":[]}
 ```
+
+- `channel_elapsed_ms`：每个渠道本次耗时（含失败渠道），用于定位慢渠道；缓存命中时为空。
+- `cached: true` 表示命中查询缓存：只写轻量行（`results` 为空），用于统计命中率，不重复写结果正文。
 
 ```toml
 [log]
