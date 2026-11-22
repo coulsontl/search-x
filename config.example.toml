@@ -1,0 +1,87 @@
+[server]
+bind = "0.0.0.0:3088"
+
+# 认证层：支持多个自定义 API key
+[auth]
+enabled = true
+keys = ["change-me-1", "change-me-2"]
+mode = "both"                # bearer | x_api_key | both | custom
+# mode = "custom" 时，从下面这个 header 读取 key
+# custom_header = "x-search-hub-key"
+
+[router]
+default_mode = "balanced"   # fast | balanced | full
+default_limit = 20
+
+# 搜索记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
+[log]
+enabled = true
+path = "logs/search.jsonl"
+max_size_mb = 100
+content_chars = 200         # 每条结果正文截断长度，0 = 不记正文
+
+# 查询缓存：相同 query + 模式 + limit 在 TTL 内直接返回，命中时响应带 cached=true
+# 请求体传 "no_cache": true 可跳过缓存强制重新搜索
+[cache]
+enabled = true
+ttl_secs = 300
+max_entries = 500
+
+# 抓取行为：多 URL 并行；单页正文返回上限；内容过短时继续尝试下一个渠道
+[fetch]
+max_content_chars = 10000
+min_content_chars = 500
+
+# 所有渠道共用同一出站 HTTP 代理（可选）；no_proxy 中的主机保持直连
+# [proxy]
+# url = "http://proxy.example.com:7890"
+# no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+
+# 免费层：SearXNG，无 key，fast 模式唯一渠道
+[channels.searxng]
+base_url = "http://127.0.0.1:8080"
+enabled = true
+timeout_secs = 10
+
+# 默认组合：Exa + Tavily
+[channels.exa]
+base_url = "https://api.exa.ai"
+keys = ["YOUR_EXA_KEY"]
+strategy = "round_robin"    # round_robin | random | failover
+timeout_secs = 15
+
+[channels.tavily]
+base_url = "https://api.tavily.com"
+keys = ["YOUR_TAVILY_KEY"]
+strategy = "round_robin"
+timeout_secs = 15
+
+# 暂无 key，默认关闭
+[channels.tinyfish]
+search_url = "https://api.search.tinyfish.ai"
+fetch_url = "https://api.fetch.tinyfish.ai"
+keys = []
+enabled = false
+timeout_secs = 15
+
+[channels.firecrawl]
+base_url = "https://api.firecrawl.dev"
+keys = []
+enabled = false
+timeout_secs = 25
+
+# 仅作为兜底，其他渠道全失败时才调用
+[channels.grok]
+base_url = "https://your-grok-endpoint/v1"
+model = "grok-4.20-fast"
+keys = []
+enabled = false
+fallback_only = true
+timeout_secs = 30
+
+# 走 agent2api 的搜索封装；需先把 workbuddy 加入其 selection.search
+[channels.workbuddy]
+base_url = "http://agent2api.example.com:3065"
+api_key = "YOUR_AGENT2API_KEY"
+enabled = false
+timeout_secs = 20
