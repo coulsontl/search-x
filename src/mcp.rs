@@ -17,7 +17,7 @@ pub async fn handle(router: &Router, body: Value) -> Value {
             json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "search-hub", "version": env!("CARGO_PKG_VERSION") }
+                "serverInfo": { "name": "search-x", "version": env!("CARGO_PKG_VERSION") }
             }),
         ),
         "tools/list" => ok(id, json!({ "tools": tools() })),

@@ -32,7 +32,7 @@ cargo build --release        # 构建
 cargo test                   # 单元测试（18 个，无网络依赖）
 cargo fmt --check            # 格式检查
 cargo clippy --all-targets -- -D warnings   # 静态检查（CI 同款）
-docker build -t search-hub:dev .            # 构建镜像
+docker build -t search-x:dev .            # 构建镜像
 ```
 
 本地运行：
@@ -78,16 +78,16 @@ curl -s http://127.0.0.1:3088/health
 ## 配置与部署
 
 - `config.toml` 含真实 key，**不进 git**；`config.example.toml` 是唯一入库模板
-- 配置路径用 `SEARCH_HUB_CONFIG` 指定；容器内建议 `/config/config.toml`
+- 配置路径用 `SEARCH_X_CONFIG` 指定；容器内建议 `/config/config.toml`
 - 容器部署（挂载目录）：
 
 ```bash
-docker run -d --name search-hub \
+docker run -d --name search-x \
   -p 127.0.0.1:3088:3088 \
   -v /path/to/config-dir:/config:ro \
   -v /path/to/logs:/logs \
   --restart unless-stopped \
-  ghcr.io/<owner>/search-hub:latest
+  ghcr.io/<owner>/search-x:latest
 ```
 
 - `POST /reload` 重读配置（需认证），修改渠道/key/代理后无需重启；reload 失败只写日志，不把配置片段返回给客户端

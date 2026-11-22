@@ -7,7 +7,7 @@ enabled = true
 keys = ["change-me-1", "change-me-2"]
 mode = "both"                # bearer | x_api_key | both | custom
 # mode = "custom" 时，从下面这个 header 读取 key
-# custom_header = "x-search-hub-key"
+# custom_header = "x-search-x-key"
 
 [router]
 default_mode = "balanced"   # fast | balanced | full

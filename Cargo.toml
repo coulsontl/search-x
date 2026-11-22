@@ -1,6 +1,6 @@
 [package]
-name = "search-hub"
-version = "0.3.1"
+name = "search-x"
+version = "0.4.0"
 edition = "2021"
 description = "Lightweight multi-channel search aggregator with MCP and REST"
 

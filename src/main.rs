@@ -20,12 +20,12 @@ async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "search_hub=info".into()),
+                .unwrap_or_else(|_| "search_x=info".into()),
         )
         .init();
 
     let config_path =
-        std::env::var("SEARCH_HUB_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+        std::env::var("SEARCH_X_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let mut config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(error) => {
@@ -50,7 +50,7 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    tracing::info!("search-hub listening on {bind}");
+    tracing::info!("search-x listening on {bind}");
     let state = Arc::new(AppState::new(runtime, config_path));
     if let Err(error) = axum::serve(listener, server::build(state)).await {
         eprintln!("server error: {error}");

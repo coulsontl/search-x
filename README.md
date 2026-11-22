@@ -1,4 +1,4 @@
-# search-hub
+# search-x
 
 轻量级多渠道搜索聚合网关：一个 Rust 单二进制，同时提供 **MCP** 和 **REST** 接口。
 
@@ -38,7 +38,7 @@ curl -s -X POST http://127.0.0.1:3088/search \
 enabled = true
 keys = ["key-1", "key-2"]   # 自定义 API key，可多个
 mode = "both"               # bearer | x_api_key | both | custom
-# custom_header = "x-search-hub-key"
+# custom_header = "x-search-x-key"
 
 [router]
 default_mode = "balanced"
@@ -87,7 +87,7 @@ timeout_secs = 15
 | `balanced` | SearXNG + Exa + Tavily + WorkBuddy（国内版） | 默认编排，四渠道并发、每渠道 20 条；实测合并去重后约 50 条（约 0.5–4s） |
 | `full` | 所有已启用渠道（再加 Firecrawl / TinyFish） | 最全，Firecrawl 抓正文慢，适合需要全文时 |
 
-> SearXNG 的 JSON API 没有条数参数，结果数由可用引擎决定（当前实例启用 bing + google cse，单次 28–30 条，翻页不可用）；search-hub 按 `limit` 截断。
+> SearXNG 的 JSON API 没有条数参数，结果数由可用引擎决定（当前实例启用 bing + google cse，单次 28–30 条，翻页不可用）；search-x 按 `limit` 截断。
 
 请求体里的 `channels` 数组可覆盖 `mode`，只调用指定供应商（如 `["exa"]`）；指定后若无结果，仍会触发 grok 兜底。
 
@@ -191,7 +191,7 @@ cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```
 
 CI（GitHub Actions）在 push/PR 时运行上述检查；推送到 `main` 或打 `v*` 标签会构建并推送镜像到 GHCR：
-`ghcr.io/<owner>/search-hub:latest`、`:<tag>`、`:sha-<commit>`。
+`ghcr.io/<owner>/search-x:latest`、`:<tag>`、`:sha-<commit>`。
 
 ## 部署
 
@@ -199,23 +199,23 @@ CI（GitHub Actions）在 push/PR 时运行上述检查；推送到 `main` 或�
 
 ```bash
 # 本地构建
-docker build -t search-hub .
+docker build -t search-x .
 
 # 或使用 CI 构建的镜像
-docker pull ghcr.io/<owner>/search-hub:latest
+docker pull ghcr.io/<owner>/search-x:latest
 
-docker run -d --name search-hub -p 127.0.0.1:3088:3088 \
+docker run -d --name search-x -p 127.0.0.1:3088:3088 \
   -v /path/to/config-dir:/config:ro \
   -v /path/to/logs:/logs \
-  -e SEARCH_HUB_CONFIG=/config/config.toml \
+  -e SEARCH_X_CONFIG=/config/config.toml \
   --restart unless-stopped \
-  search-hub
+  search-x
 ```
 
 环境变量：
 
 | 变量 | 说明 |
 |---|---|
-| `SEARCH_HUB_CONFIG` | 配置文件路径（默认 `config.toml`） |
+| `SEARCH_X_CONFIG` | 配置文件路径（默认 `config.toml`） |
 | `CLAUDE_CONFIG_PATH` | 可选；grok key 自动导入时读取的 Claude 配置路径（默认 `~/.claude.json`） |
-| `RUST_LOG` | 日志级别（默认 `search_hub=info`） |
+| `RUST_LOG` | 日志级别（默认 `search_x=info`） |

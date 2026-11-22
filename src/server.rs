@@ -275,9 +275,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", HeaderValue::from_static("Bearer token-a"));
         let mut config = auth_config(AuthMode::Custom);
-        config.custom_header = Some("x-search-hub-key".to_string());
+        config.custom_header = Some("x-search-x-key".to_string());
         assert_eq!(extract_key(&headers, &config), None);
-        headers.insert("x-search-hub-key", HeaderValue::from_static("token-c"));
+        headers.insert("x-search-x-key", HeaderValue::from_static("token-c"));
         assert_eq!(extract_key(&headers, &config).as_deref(), Some("token-c"));
     }
 }

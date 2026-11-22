@@ -8,7 +8,7 @@
 
 - **现象**：修改宿主机 `config.toml` 后 `POST /reload` 返回 200，但新配置没生效（日志里的代理地址还是旧的）。
 - **根因**：单文件 bind mount 绑定的是 inode；`sed -i`、vim 等编辑方式实际是"写临时文件 + rename"，inode 变了，容器内 `/config.toml` 仍指向旧 inode。
-- **解决**：挂载**目录**（`-v /path/to/config-dir:/config:ro` + `SEARCH_HUB_CONFIG=/config/config.toml`）。容器内每次 reload 重新打开路径，永远读到新文件。
+- **解决**：挂载**目录**（`-v /path/to/config-dir:/config:ro` + `SEARCH_X_CONFIG=/config/config.toml`）。容器内每次 reload 重新打开路径，永远读到新文件。
 
 ### 2. 本地 Docker Desktop 未启动
 
