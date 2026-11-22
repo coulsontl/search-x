@@ -213,10 +213,14 @@ fn normalize_url(raw: &str) -> String {
     parsed.set_fragment(None);
     let host = parsed.host_str().unwrap_or_default();
     let host = host.strip_prefix("www.").unwrap_or(host);
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
     let path = parsed.path().trim_end_matches('/');
     match parsed.query() {
-        Some(query) if !query.is_empty() => format!("{host}{path}?{query}"),
-        _ => format!("{host}{path}"),
+        Some(query) if !query.is_empty() => format!("{host}{port}{path}?{query}"),
+        _ => format!("{host}{port}{path}"),
     }
 }
 
@@ -320,6 +324,15 @@ mod tests {
         let ordered = move_searxng_last(rrf_merge(vec![results]));
         let channels: Vec<&str> = ordered.iter().map(|item| item.channel.as_str()).collect();
         assert_eq!(channels, ["exa", "tavily", "searxng", "searxng"]);
+    }
+
+    #[test]
+    fn keeps_port_distinct() {
+        let results = vec![
+            result("A", "https://example.com:8080/foo", "", "exa"),
+            result("B", "https://example.com/foo", "", "tavily"),
+        ];
+        assert_eq!(rrf_merge(vec![results]).len(), 2);
     }
 
     #[test]

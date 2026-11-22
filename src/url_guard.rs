@@ -27,30 +27,41 @@ pub fn is_public_http_url(raw: &str) -> bool {
     // IPv6 字面量在 URL 里带方括号（如 [::1]），解析 IP 前去掉。
     let ip_candidate = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_candidate.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => {
-                let octets = v4.octets();
-                let cgnat = octets[0] == 100 && (64..128).contains(&octets[1]);
-                !(v4.is_private()
-                    || v4.is_loopback()
-                    || v4.is_link_local()
-                    || v4.is_broadcast()
-                    || v4.is_unspecified()
-                    || v4.is_documentation()
-                    || v4.is_multicast()
-                    || cgnat)
-            }
-            IpAddr::V6(v6) => {
-                let segments = v6.segments();
-                !(v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_multicast()
-                    || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                    || (segments[0] & 0xffc0) == 0xfe80) // fe80::/10 link local
-            }
-        };
+        return is_public_ip(ip);
     }
     true
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_ipv4(v4),
+        IpAddr::V6(v6) => {
+            // ::ffff:a.b.c.d（IPv4-mapped）必须按对应 IPv4 判断，
+            // 否则 [::ffff:127.0.0.1] 会绕过回环/私网检查。
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ipv4(v4);
+            }
+            let segments = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (segments[0] & 0xffc0) == 0xfe80) // fe80::/10 link local
+        }
+    }
+}
+
+fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    let cgnat = octets[0] == 100 && (64..128).contains(&octets[1]);
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_unspecified()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || cgnat)
 }
 
 #[cfg(test)]
@@ -67,6 +78,8 @@ mod tests {
             "http://169.254.169.254/latest/meta-data/",
             "http://100.64.0.1/",
             "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:10.0.0.1]/",
             "http://[fd00::1]/",
             "http://foo.internal/",
             "file:///etc/passwd",
@@ -82,6 +95,7 @@ mod tests {
             "https://example.com/",
             "https://www.ithome.com/1/030/332.htm",
             "http://1.1.1.1/",
+            "http://[::ffff:8.8.8.8]/",
         ] {
             assert!(is_public_http_url(url), "{url} should be allowed");
         }

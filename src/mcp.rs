@@ -11,6 +11,10 @@ pub async fn handle(router: &Router, body: Value) -> Value {
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    // 通知类消息（如 notifications/initialized）按 MCP 规范不需要响应。
+    if method.starts_with("notifications/") {
+        return Value::Null;
+    }
     match method {
         "initialize" => ok(
             id,
@@ -135,7 +139,16 @@ async fn call_tool(router: &Router, name: &str, arguments: Value, id: Value) -> 
             }
             let request = FetchRequest {
                 urls,
-                channels: None,
+                channels: arguments
+                    .get("channels")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    }),
             };
             let response = router.fetch(request).await;
             tool_result(id, serde_json::to_value(response).unwrap_or(Value::Null))
@@ -170,4 +183,56 @@ fn tool_error(id: Value, message: impl Into<String>) -> Value {
             "isError": true
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::handle;
+    use crate::router::Router;
+
+    fn test_router() -> Router {
+        Router::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+            "balanced".to_string(),
+            10,
+            None,
+            None,
+            10000,
+            500,
+        )
+    }
+
+    #[tokio::test]
+    async fn notifications_get_no_response() {
+        let result = handle(
+            &test_router(),
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+        assert!(result.is_null());
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_jsonrpc_error() {
+        let result = handle(
+            &test_router(),
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "no/such"}),
+        )
+        .await;
+        assert_eq!(result["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn initialize_reports_server_name() {
+        let result = handle(
+            &test_router(),
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+        )
+        .await;
+        assert_eq!(result["result"]["serverInfo"]["name"], "search-x");
+    }
 }

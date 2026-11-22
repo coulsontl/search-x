@@ -37,12 +37,18 @@ impl AppState {
     }
 
     fn snapshot(&self) -> (Arc<Router>, AuthConfig) {
-        let inner = self.inner.read().expect("state lock poisoned");
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         (inner.router.clone(), inner.auth.clone())
     }
 
     fn replace(&self, runtime: Runtime) {
-        let mut inner = self.inner.write().expect("state lock poisoned");
+        let mut inner = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.router = runtime.router;
         inner.auth = runtime.auth;
     }
@@ -160,7 +166,12 @@ async fn mcp_endpoint(
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
-    Json(mcp::handle(&router, body).await).into_response()
+    let response = mcp::handle(&router, body).await;
+    // MCP 通知（notifications/*）没有 id，不需要 JSON-RPC 响应。
+    if response.is_null() {
+        return StatusCode::ACCEPTED.into_response();
+    }
+    Json(response).into_response()
 }
 
 fn unauthorized(auth: &AuthConfig, headers: &HeaderMap) -> Option<Response> {

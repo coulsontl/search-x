@@ -81,7 +81,13 @@ impl Router {
         let limit = request.limit.unwrap_or(self.default_limit).clamp(1, 100);
         let selected = self.select_channels(&mode, request.channels.as_deref());
         let cache_scope = match request.channels.as_deref() {
-            Some(channels) => channels.join(","),
+            Some(channels) => {
+                // 渠道顺序不影响结果，排序后作为缓存 key，避免 ["exa","tavily"] 与 ["tavily","exa"] 各存一份
+                let mut names: Vec<&str> = channels.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                names.dedup();
+                names.join(",")
+            }
             None => mode.clone(),
         };
         let selected_ref = &selected;

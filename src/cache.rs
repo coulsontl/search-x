@@ -26,7 +26,11 @@ impl QueryCache {
     }
 
     pub fn get(&self, key: &str) -> Option<SearchResponse> {
-        let mut entries = self.entries.lock().expect("cache lock poisoned");
+        // 持锁线程 panic 后继续可用（缓存只是加速，不值得让整个服务挂掉）
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match entries.get(key) {
             Some(entry) if entry.expires_at > Instant::now() => Some(entry.response.clone()),
             Some(_) => {
@@ -38,7 +42,10 @@ impl QueryCache {
     }
 
     pub fn put(&self, key: String, response: SearchResponse) {
-        let mut entries = self.entries.lock().expect("cache lock poisoned");
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Instant::now();
         entries.retain(|_, entry| entry.expires_at > now);
         if entries.len() >= self.max_entries {
@@ -61,7 +68,10 @@ impl QueryCache {
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.entries.lock().expect("cache lock poisoned").len()
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 }
 
