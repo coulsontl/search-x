@@ -243,6 +243,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             timeouts,
             config.router.default_mode.clone(),
             config.router.default_limit,
+            config.search.max_content_chars,
             logger,
             cache,
             config.fetch.max_content_chars,

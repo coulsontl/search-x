@@ -142,14 +142,19 @@ Authorization: Bearer <api-key>
 每次搜索（REST 和 MCP）追加一行 JSONL：
 
 ```json
-{"ts":"2026-11-22T11:20:00Z","kind":"search","query":"...","mode":"balanced","elapsed_ms":1832,
+{"ts":"2026-11-22T11:20:00Z","kind":"search","query":"...","mode":"balanced","limit":20,
+ "no_cache":false,"requested_channels":["exa","tavily"],"elapsed_ms":1832,
  "channels":["exa","tavily"],"channel_elapsed_ms":{"exa":1292,"tavily":1820},
- "cached":false,"result_count":19,"errors":[]}
+ "cached":false,"result_count":3,"result_content_chars":[3000,2860,1999],
+ "errors":[]}
 ```
 
-- **默认只记元数据**：查询、模式、耗时、渠道、结果数、错误，不记录返回内容，日志体积小。需要排查结果质量时把 `include_results` 设为 `true`，才会附加 `results`（正文按 `content_chars` 截断）。
+- **默认只记元数据**：查询、模式、limit、是否绕过缓存、请求渠道、耗时、渠道、结果数、每条结果正文长度、错误，不记录返回内容，日志体积小。需要排查结果质量时把 `include_results` 设为 `true`，才会附加 `results`（正文按 `content_chars` 截断）。
+- `result_content_chars`：按最终结果顺序记录每条正文的字符数，不记录正文本身。
 - `channel_elapsed_ms`：每个渠道本次耗时（含失败渠道），用于定位慢渠道；缓存命中时为空。
 - `cached: true` 表示命中查询缓存，用于统计命中率。
+- `requested_channels` 只在调用方显式传 `channels` 时出现；`channels` 是本次实际返回了结果的渠道，两者可能不同。
+- `limit` / `no_cache` 用于解释缓存 key 与缓存未命中：相同 query 但 limit 不同，或调用方传了 `no_cache: true`，都会绕过或更换缓存。
 
 抓取（REST `/fetch` 与 MCP `web_fetch`）也会追加 `kind: "fetch"` 的元数据行：记录每个 URL 实际使用的渠道与正文长度（`chars`），不记录正文：
 
@@ -178,6 +183,17 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 
 `base_url` 仍需在 `config.toml` 填写（MCP 配置里没有 grok2api/AxonHub 的地址）。
 
+## 搜索行为
+
+- 单条搜索结果正文按 `[search] max_content_chars`（默认 8000 字符）截断，避免 Tavily PDF/长文等返回超大正文；截断按 Unicode 字符，不会切坏中文
+- 正文为空的结果在进入 RRF 合并前丢弃；如果某渠道全部为空，等同于该渠道没有结果
+- `limit` 是**每渠道**上限，最终结果数会随启用的渠道数增加
+
+```toml
+[search]
+max_content_chars = 8000
+```
+
 ## 抓取行为
 
 - 多个 URL **并行**抓取；单个 URL 内部默认按 `[fetch] channel_order` 降级，默认 **Firecrawl → Tavily → Exa → TinyFish**（Firecrawl 抓 SPA/长文最完整但较慢，Tavily 速度与正文较均衡，Exa 快但常只给 5000 字）；请求显式传 `channels` 时按调用方给出的顺序尝试，不受 `channel_order` 影响
@@ -199,7 +215,7 @@ github_token = "ghp_..."   # 可选；也可用 GITHUB_TOKEN 环境变量
 |---|---|---|---|
 | SearXNG | ✅ | ❌ | 免费、无 key；`fast` 模式 |
 | Exa | ✅ | ✅ | 单次最多 100 条；PDF/技术站可以，SPA/Reddit 不行 |
-| Tavily | ✅ | ✅ | 10 条/查询，`include_raw_content` 带正文 |
+| Tavily | ✅ | ✅ | 10 条/查询，`include_raw_content` 带正文（搜索正文按 `[search] max_content_chars` 截断） |
 | TinyFish | ✅ | ✅ | `X-API-Key`；默认未配置 |
 | Firecrawl | ✅ | ✅ | SPA（小黑盒）最强；抓正文较慢 |
 | grok | ✅ | ❌ | 直连 Responses API，仅兜底 |
@@ -226,7 +242,7 @@ account_ttl_secs = 600
 ## 开发
 
 ```bash
-cargo test                                  # 36 个单元测试，无网络依赖
+cargo test                                  # 37 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```

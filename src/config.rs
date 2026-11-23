@@ -12,6 +12,8 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub search: SearchConfig,
+    #[serde(default)]
     pub fetch: FetchConfig,
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,
@@ -50,6 +52,25 @@ fn default_cache_ttl_secs() -> u64 {
 
 fn default_cache_max_entries() -> usize {
     500
+}
+
+/// 搜索行为：单条搜索结果正文的返回上限。
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default = "default_search_max_content_chars")]
+    pub max_content_chars: usize,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            max_content_chars: default_search_max_content_chars(),
+        }
+    }
+}
+
+fn default_search_max_content_chars() -> usize {
+    8000
 }
 
 /// 抓取行为：单页正文返回上限，以及"内容过短时继续尝试下一个渠道"的阈值。
@@ -398,6 +419,7 @@ bind = "0.0.0.0:3088"
         assert_eq!(config.router.default_limit, 20);
         assert!(config.cache.enabled);
         assert_eq!(config.cache.ttl_secs, 300);
+        assert_eq!(config.search.max_content_chars, 8000);
         assert_eq!(config.fetch.max_content_chars, 10000);
         assert_eq!(config.fetch.min_content_chars, 500);
         assert_eq!(

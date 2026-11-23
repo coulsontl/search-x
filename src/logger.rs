@@ -36,7 +36,14 @@ impl SearchLogger {
 
     /// 追加一条搜索 JSONL 记录；超过上限时先把当前文件轮转为 `.1`。
     /// 默认只写查询与统计字段，`include_results = true` 时才附结果明细。
-    pub fn log(&self, mode: &str, response: &SearchResponse) {
+    pub fn log(
+        &self,
+        mode: &str,
+        limit: usize,
+        no_cache: bool,
+        requested_channels: Option<&[String]>,
+        response: &SearchResponse,
+    ) {
         let Ok(_guard) = self.lock.lock() else { return };
         self.rotate_if_needed();
         let mut record = json!({
@@ -44,13 +51,23 @@ impl SearchLogger {
             "kind": "search",
             "query": response.query,
             "mode": mode,
+            "limit": limit,
+            "no_cache": no_cache,
             "elapsed_ms": response.elapsed_ms,
             "channels": response.channels,
             "channel_elapsed_ms": response.channel_elapsed_ms,
             "cached": response.cached,
             "result_count": response.results.len(),
+            "result_content_chars": response
+                .results
+                .iter()
+                .map(|item| item.content.chars().count())
+                .collect::<Vec<_>>(),
             "errors": response.errors,
         });
+        if let Some(channels) = requested_channels {
+            record["requested_channels"] = json!(channels);
+        }
         if self.include_results && !response.cached {
             record["results"] = json!(response
                 .results
@@ -159,20 +176,37 @@ mod tests {
     #[test]
     fn search_log_omits_results_by_default_and_truncates_when_enabled() {
         let path = temp_log_path("search-metadata");
-        SearchLogger::new(path.clone(), 1, false, 200).log("balanced", &sample_search_response());
+        let requested = vec!["tavily".to_string()];
+        SearchLogger::new(path.clone(), 1, false, 200).log(
+            "balanced",
+            20,
+            false,
+            Some(&requested),
+            &sample_search_response(),
+        );
         let line = fs::read_to_string(&path).unwrap();
         let record: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(record["kind"], "search");
+        assert_eq!(record["limit"], 20);
+        assert_eq!(record["no_cache"], false);
+        assert_eq!(record["requested_channels"][0], "tavily");
         assert_eq!(record["result_count"], 1);
+        assert_eq!(record["result_content_chars"][0], 10);
         assert!(record.get("results").is_none());
         fs::remove_file(&path).unwrap();
 
         let detailed_path = temp_log_path("search-detailed");
-        SearchLogger::new(detailed_path.clone(), 1, true, 5)
-            .log("balanced", &sample_search_response());
+        SearchLogger::new(detailed_path.clone(), 1, true, 5).log(
+            "balanced",
+            20,
+            false,
+            None,
+            &sample_search_response(),
+        );
         let line = fs::read_to_string(&detailed_path).unwrap();
         let record: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(record["results"][0]["content"], "12345");
+        assert!(record.get("requested_channels").is_none());
         fs::remove_file(&detailed_path).unwrap();
     }
 

@@ -13,6 +13,10 @@ mode = "both"                # bearer | x_api_key | both | custom
 default_mode = "balanced"   # fast | balanced | full
 default_limit = 20
 
+# 搜索结果单条正文上限（按 Unicode 字符截断；空正文结果会被过滤）
+[search]
+max_content_chars = 8000
+
 # 搜索/抓取记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
 # 默认只记查询、耗时、渠道、结果数等元数据，不记返回内容
 [log]

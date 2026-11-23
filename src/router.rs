@@ -28,12 +28,21 @@ fn truncate_chars(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
+/// 空正文的结果对搜索没有价值，进入 RRF 前丢弃。
+fn non_empty_results(items: Vec<SearchResult>) -> Vec<SearchResult> {
+    items
+        .into_iter()
+        .filter(|item| !item.content.trim().is_empty())
+        .collect()
+}
+
 pub struct Router {
     channels: Vec<Arc<dyn Channel>>,
     fallback: Vec<Arc<dyn Channel>>,
     timeouts: HashMap<String, Duration>,
     default_mode: String,
     default_limit: usize,
+    search_max_content_chars: usize,
     logger: Option<Arc<SearchLogger>>,
     cache: Option<Arc<QueryCache>>,
     fetch_max_content_chars: usize,
@@ -50,6 +59,7 @@ impl Router {
         timeouts: HashMap<String, Duration>,
         default_mode: String,
         default_limit: usize,
+        search_max_content_chars: usize,
         logger: Option<Arc<SearchLogger>>,
         cache: Option<Arc<QueryCache>>,
         fetch_max_content_chars: usize,
@@ -63,6 +73,7 @@ impl Router {
             timeouts,
             default_mode,
             default_limit,
+            search_max_content_chars,
             logger,
             cache,
             fetch_max_content_chars,
@@ -141,7 +152,13 @@ impl Router {
         if let Some(logger) = &self.logger {
             // 缓存命中也要记录（轻量行），用于统计命中率。
             for response in &responses {
-                logger.log(&mode, response);
+                logger.log(
+                    &mode,
+                    limit,
+                    bypass_cache,
+                    request.channels.as_deref(),
+                    response,
+                );
             }
         }
         responses
@@ -323,11 +340,13 @@ impl Router {
         for (name, elapsed_ms, outcome) in outcomes {
             channel_elapsed_ms.insert(name.clone(), elapsed_ms);
             match outcome {
-                Ok(items) if !items.is_empty() => {
-                    used.push(name);
-                    per_channel.push(items);
+                Ok(items) => {
+                    let items = non_empty_results(items);
+                    if !items.is_empty() {
+                        used.push(name);
+                        per_channel.push(items);
+                    }
                 }
-                Ok(_) => {}
                 Err(error) => errors.push(error),
             }
         }
@@ -344,20 +363,27 @@ impl Router {
                     call_started.elapsed().as_millis() as u64,
                 );
                 match outcome {
-                    Ok(items) if !items.is_empty() => {
-                        used.push(channel.name().to_string());
-                        results = rrf_merge(vec![items]);
-                        break;
+                    Ok(items) => {
+                        let items = non_empty_results(items);
+                        if !items.is_empty() {
+                            used.push(channel.name().to_string());
+                            results = rrf_merge(vec![items]);
+                            break;
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) => errors.push(error),
                 }
             }
         }
 
+        let mut results = move_searxng_last(results);
+        for item in &mut results {
+            item.content = truncate_chars(&item.content, self.search_max_content_chars);
+        }
+
         SearchResponse {
             query: query.to_string(),
-            results: move_searxng_last(results),
+            results,
             channels: used,
             errors,
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -418,6 +444,16 @@ mod tests {
             });
             (channel, search_calls, fetch_calls)
         }
+
+        fn with_results(name: &'static str, search_results: Vec<SearchResult>) -> Arc<Self> {
+            Arc::new(Self {
+                name,
+                search_results,
+                fetch_content: String::new(),
+                search_calls: Arc::new(AtomicUsize::new(0)),
+                fetch_calls: Arc::new(AtomicUsize::new(0)),
+            })
+        }
     }
 
     #[async_trait]
@@ -466,12 +502,31 @@ mod tests {
         min_chars: usize,
         fetch_channel_order: Vec<String>,
     ) -> Router {
+        build_router_with_search_cap(
+            channels,
+            cache,
+            max_chars,
+            min_chars,
+            fetch_channel_order,
+            8000,
+        )
+    }
+
+    fn build_router_with_search_cap(
+        channels: Vec<Arc<dyn Channel>>,
+        cache: Option<Arc<QueryCache>>,
+        max_chars: usize,
+        min_chars: usize,
+        fetch_channel_order: Vec<String>,
+        search_max_content_chars: usize,
+    ) -> Router {
         Router::new(
             channels,
             Vec::new(),
             HashMap::new(),
             "balanced".to_string(),
             10,
+            search_max_content_chars,
             None,
             cache,
             max_chars,
@@ -496,6 +551,49 @@ mod tests {
         assert_eq!(truncate_chars("abcdef", 3), "abc");
         assert_eq!(truncate_chars("中文内容", 2), "中文");
         assert_eq!(truncate_chars("短", 10), "短");
+    }
+
+    #[tokio::test]
+    async fn search_filters_empty_content_and_truncates() {
+        let channel = MockChannel::with_results(
+            "exa",
+            vec![
+                SearchResult {
+                    title: "empty".to_string(),
+                    url: "https://empty.example.com/".to_string(),
+                    content: "   ".to_string(),
+                    published_date: None,
+                    channel: "exa".to_string(),
+                },
+                SearchResult {
+                    title: "long".to_string(),
+                    url: "https://long.example.com/".to_string(),
+                    content: "中".repeat(20),
+                    published_date: None,
+                    channel: "exa".to_string(),
+                },
+                SearchResult {
+                    title: "short".to_string(),
+                    url: "https://short.example.com/".to_string(),
+                    content: "ok".to_string(),
+                    published_date: None,
+                    channel: "exa".to_string(),
+                },
+            ],
+        );
+        let router =
+            build_router_with_search_cap(vec![channel], None, 10000, 500, fetch_order(&["exa"]), 5);
+
+        let response = router.search(search_request()).await;
+        let results = &response[0].results;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|item| !item.content.trim().is_empty()));
+        let long = results
+            .iter()
+            .find(|item| item.url == "https://long.example.com/")
+            .unwrap();
+        assert_eq!(long.content, "中".repeat(5));
+        assert!(!results.iter().any(|item| item.title == "empty"));
     }
 
     #[tokio::test]

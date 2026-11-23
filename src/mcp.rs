@@ -202,6 +202,7 @@ mod tests {
             HashMap::new(),
             "balanced".to_string(),
             10,
+            8000,
             None,
             None,
             10000,
