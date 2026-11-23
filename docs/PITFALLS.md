@@ -118,3 +118,21 @@
 
 - **现象**：抓 Reddit 等站点时 Firecrawl 返回 403（提示不支持该站点）；旧逻辑把 403 当成 key 失效并永久禁用，后续所有 URL 都报 `no_key`。
 - **解决**：Firecrawl 渠道收到 403 时只返回错误、不调用 `report_failure`；401/429/5xx 与网络错误仍按原策略冷却/禁用。注意这不改变其它渠道对 403 的处理。
+
+### 20. MCP 工具结果过大会被客户端直接拒绝
+
+- **现象**：`web_search` 返回 `result (155326 characters across 1 line) exceeds maximum allowed tokens`，搜索本身成功，但结果没有交付给模型。
+- **根因**：只限制了单条正文（`[search] max_content_chars=8000`），没有限制 MCP 总响应；`default_limit=20` 是每渠道，`balanced` 多渠道 + 多 query 会线性放大。
+- **解决**：`[mcp]` 独立预算（`max_response_chars` / `max_content_chars` / `max_fetch_content_chars` / `max_queries` / `default_limit`）；超限按 RRF 尾部丢弃并返回 `truncated`、`omitted_results` 或 `omitted_pages`。需要全文时用 `web_fetch`，不要在 `web_search` 里塞全文。
+
+### 21. SearXNG 的 Bing 引擎会主动丢掉 cc，导致结果与查询无关
+
+- **现象**：`format=json` 搜 `Rust programming language` 返回 BDT→SGD 汇率、瓦努阿图旅游等无关结果；`language=en-GB` 甚至 0 条，只有 `language=zh-CN` 相对正常。
+- **根因**：SearXNG `bing.py` 对 `us` / `cn` / `ru` 不发送 `cc` 参数（注释写的是 "bing just sends junk for these"）；当前 Bing 在没有 `cc` 时会返回热门/无关结果。`google cse` 又被限流，SearXNG 实际只剩 Bing 一个引擎。
+- **解决**：默认编排不再使用 SearXNG；需要免费搜索时先修 Bing 引擎（例如保留 `cc=US` 或改用其它可用引擎），修好前不要把它放回 `fast` / `balanced`。
+
+### 22. fast 串行兜底不要把“少于 limit”当成不可用
+
+- **现象**：WorkBuddy 配置 `max_results=10`，但上游 10 条里可能有空正文，过滤后只回 9 条。如果按 `items.len() < limit` 继续调 Tavily/Exa，会把 0.2s 的快路径变成多次串行调用。
+- **决策**：`fast` 只在渠道**报错或 0 条结果**时继续下一个渠道；非空但少于 10 条算可用，直接返回。需要更多结果时由调用方显式传 `channels` 或改用 `balanced`。
+- **覆盖语义**：请求显式传 `channels` 时不走 fast 串行兜底，仍按显式渠道并行调用。

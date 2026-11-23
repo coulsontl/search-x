@@ -9,7 +9,7 @@ use axum::{
 };
 use serde_json::json;
 
-use crate::config::{AuthConfig, AuthMode};
+use crate::config::{AuthConfig, AuthMode, McpConfig};
 use crate::mcp;
 use crate::model::{FetchRequest, SearchRequest};
 use crate::router::Router;
@@ -18,6 +18,7 @@ use crate::runtime::{self, Runtime};
 struct Inner {
     router: Arc<Router>,
     auth: AuthConfig,
+    mcp: McpConfig,
 }
 
 pub struct AppState {
@@ -31,17 +32,18 @@ impl AppState {
             inner: RwLock::new(Inner {
                 router: runtime.router,
                 auth: runtime.auth,
+                mcp: runtime.mcp,
             }),
             config_path,
         }
     }
 
-    fn snapshot(&self) -> (Arc<Router>, AuthConfig) {
+    fn snapshot(&self) -> (Arc<Router>, AuthConfig, McpConfig) {
         let inner = self
             .inner
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (inner.router.clone(), inner.auth.clone())
+        (inner.router.clone(), inner.auth.clone(), inner.mcp.clone())
     }
 
     fn replace(&self, runtime: Runtime) {
@@ -51,6 +53,7 @@ impl AppState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         inner.router = runtime.router;
         inner.auth = runtime.auth;
+        inner.mcp = runtime.mcp;
     }
 }
 
@@ -72,7 +75,7 @@ async fn health() -> Response {
 
 /// 重新读取 config.toml 并替换渠道/key/路由/认证配置，无需重启进程。
 async fn reload(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    let (_, auth) = state.snapshot();
+    let (_, auth, _) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
@@ -99,7 +102,7 @@ async fn search(
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> Response {
-    let (router, auth) = state.snapshot();
+    let (router, auth, _) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
@@ -130,7 +133,7 @@ async fn fetch(
     headers: HeaderMap,
     Json(request): Json<FetchRequest>,
 ) -> Response {
-    let (router, auth) = state.snapshot();
+    let (router, auth, _) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
@@ -160,11 +163,11 @@ async fn mcp_endpoint(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let (router, auth) = state.snapshot();
+    let (router, auth, mcp_config) = state.snapshot();
     if let Some(reason) = unauthorized(&auth, &headers) {
         return reason;
     }
-    let response = mcp::handle(&router, body).await;
+    let response = mcp::handle(&router, &mcp_config, body).await;
     // MCP 通知（notifications/*）没有 id，不需要 JSON-RPC 响应。
     if response.is_null() {
         return StatusCode::ACCEPTED.into_response();

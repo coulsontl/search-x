@@ -10,14 +10,21 @@ pub struct TavilyChannel {
     client: reqwest::Client,
     base_url: String,
     keys: KeyPool,
+    include_raw_content: bool,
 }
 
 impl TavilyChannel {
-    pub fn new(base_url: String, keys: KeyPool, client: reqwest::Client) -> Self {
+    pub fn new(
+        base_url: String,
+        keys: KeyPool,
+        client: reqwest::Client,
+        include_raw_content: bool,
+    ) -> Self {
         Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             keys,
+            include_raw_content,
         }
     }
 }
@@ -46,7 +53,7 @@ impl Channel for TavilyChannel {
             "query": query,
             "search_depth": "basic",
             "max_results": limit.clamp(1, 20),
-            "include_raw_content": true
+            "include_raw_content": self.include_raw_content
         });
         let response = self
             .client

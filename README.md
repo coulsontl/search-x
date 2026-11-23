@@ -4,7 +4,7 @@
 
 - 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（agent2api / export）
 - 每个渠道支持**多个 key 轮询**与失败冷却，**base URL 可自定义**（便于走反代）
-- 三档路由：`fast` / `balanced` / `full`，并行调用、独立超时、失败降级
+- 三档路由：`fast`（串行兜底）/ `balanced`（并行）/ `full`（并行），独立超时、失败降级
 - **RRF 融合排序** + URL 归一化去重（保留最长正文），SearXNG 摘要结果统一排最后
 - **查询缓存**（TTL + 容量上限，请求可传 `no_cache` 绕过）
 - **并行抓取**：多个 URL 同时抓，内容过短自动换渠道重试，正文按字符安全截断
@@ -44,6 +44,16 @@ mode = "both"               # bearer | x_api_key | both | custom
 [router]
 default_mode = "balanced"
 default_limit = 20
+fast_limit = 10             # fast 每渠道条数
+fast_channels = ["workbuddy", "tavily", "exa"]  # 串行兜底顺序
+fast_timeout_secs = 5       # fast 每渠道超时上限
+
+[mcp]
+max_response_chars = 50000  # MCP 单次结果总字符上限
+max_content_chars = 1500    # web_search 每条正文上限；全文用 web_fetch
+max_fetch_content_chars = 4000
+max_queries = 3
+default_limit = 8
 
 [proxy]                              # 可选：所有渠道共用出站代理
 url = "http://proxy.example.com:7890"
@@ -84,11 +94,13 @@ timeout_secs = 15
 
 | 模式 | 渠道 | 用途 |
 |---|---|---|
-| `fast` | SearXNG | 免费、最快（约 0.5–0.7s，单次约 20 条） |
-| `balanced` | SearXNG + Exa + Tavily + WorkBuddy（国内版） | 默认编排，四渠道并发、每渠道 20 条（WorkBuddy 上游上限 5/10 条，视模式而定）；实测合并去重后约 50–65 条（约 0.5–4s） |
-| `full` | 所有已启用渠道（再加 Firecrawl / TinyFish） | 最全，Firecrawl 抓正文慢，适合需要全文时 |
+| `fast` | WorkBuddy → Tavily → Exa（串行兜底） | 先用 WorkBuddy 出 10 条；报错/0 条才试 Tavily，再不行试 Exa；每次只用一个渠道，适合快速探索 |
+| `balanced` | Exa + Tavily + WorkBuddy（国内版） | 默认编排，三渠道并发、每渠道 `default_limit`（默认 20 条；WorkBuddy 上游上限 10 条） |
+| `full` | 所有已启用渠道（含 Firecrawl / TinyFish / 可选 SearXNG） | 最全，Firecrawl 抓正文慢，适合需要全文时 |
 
-> SearXNG 的 JSON API 没有条数参数，结果数由可用引擎决定（当前实例启用 bing + google cse，单次 28–30 条，翻页不可用）；search-x 按 `limit` 截断。
+> `fast` 每个渠道的超时取 `min(channel.timeout_secs, fast_timeout_secs)`，默认 5 秒；WorkBuddy 卡住时会尽快切到 Tavily/Exa，而不是等满 10 秒。
+>
+> **SearXNG 默认不参与 `fast` / `balanced`**：当前实例的 Bing 引擎在没有正确 `cc` 参数时会返回与查询无关的结果，`google cse` 也常被限流；在修复前只建议通过 `full` 或显式 `channels` 使用。SearXNG 的 JSON API 没有条数参数，结果数由可用引擎决定。
 
 请求体里的 `channels` 数组可覆盖 `mode`，只调用指定供应商（如 `["exa"]`）；指定后若无结果，仍会触发 grok 兜底。
 
@@ -122,6 +134,19 @@ POST /mcp
 
 工具：`web_search`、`web_fetch`。
 
+MCP 客户端通常把一次工具结果整体放进上下文，因此 MCP 输出有独立预算：
+
+```toml
+[mcp]
+max_response_chars = 50000      # 所有 query 合计；超出按 RRF 排名从尾部丢弃
+max_content_chars = 1500        # web_search 每条正文上限，全文用 web_fetch
+max_fetch_content_chars = 4000  # web_fetch 每页正文上限
+max_queries = 3                 # web_search 单次 query 数
+default_limit = 8               # web_search 未传 limit 时每渠道条数
+```
+
+超出预算时，结果里会带 `truncated: true`、`omitted_results`（搜索）或 `omitted_pages`（抓取）。REST `/search`、`/fetch` 不受这套预算影响，仍按 `[search]` / `[fetch]` 的配置返回。
+
 ### 健康检查
 
 ```http
@@ -142,13 +167,14 @@ Authorization: Bearer <api-key>
 每次搜索（REST 和 MCP）追加一行 JSONL：
 
 ```json
-{"ts":"2026-11-22T11:20:00Z","kind":"search","query":"...","mode":"balanced","limit":20,
+{"ts":"2026-11-22T11:20:00Z","kind":"search","source":"rest","query":"...","mode":"balanced","limit":20,
  "no_cache":false,"requested_channels":["exa","tavily"],"elapsed_ms":1832,
  "channels":["exa","tavily"],"channel_elapsed_ms":{"exa":1292,"tavily":1820},
  "cached":false,"result_count":3,"result_content_chars":[3000,2860,1999],
  "errors":[]}
 ```
 
+- `source`：`rest` 或 `mcp`，用于区分 REST 与 MCP 流量；测试/探针请求也可据此过滤。
 - **默认只记元数据**：查询、模式、limit、是否绕过缓存、请求渠道、耗时、渠道、结果数、每条结果正文长度、错误，不记录返回内容，日志体积小。需要排查结果质量时把 `include_results` 设为 `true`，才会附加 `results`（正文按 `content_chars` 截断）。
 - `result_content_chars`：按最终结果顺序记录每条正文的字符数，不记录正文本身。
 - `channel_elapsed_ms`：每个渠道本次耗时（含失败渠道），用于定位慢渠道；缓存命中时为空。
@@ -159,9 +185,19 @@ Authorization: Bearer <api-key>
 抓取（REST `/fetch` 与 MCP `web_fetch`）也会追加 `kind: "fetch"` 的元数据行：记录每个 URL 实际使用的渠道与正文长度（`chars`），不记录正文：
 
 ```json
-{"ts":"2026-11-22T11:21:00Z","kind":"fetch","elapsed_ms":1137,"page_count":1,
+{"ts":"2026-11-22T11:21:00Z","kind":"fetch","source":"rest","elapsed_ms":1137,"page_count":1,
  "pages":[{"url":"https://example.com/","channel":"tavily","chars":10000}],"errors":[]}
 ```
+
+MCP 调用还会额外写一行最终输出预算日志（`kind: "mcp"`），用于观察是否触发 50K 字符/正文截断：
+
+```json
+{"ts":"2026-11-22T11:22:00Z","kind":"mcp","source":"mcp","tool":"web_search",
+ "queries":["..."],"query_count":3,"mode":"balanced","limit":20,
+ "response_chars":48582,"truncated":true,"omitted_results":107}
+```
+
+`web_fetch` 对应字段为 `tool:"web_fetch"`、`url_count`、`response_chars`、`truncated`、`omitted_pages`。
 
 ```toml
 [log]
@@ -187,7 +223,8 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 
 - 单条搜索结果正文按 `[search] max_content_chars`（默认 8000 字符）截断，避免 Tavily PDF/长文等返回超大正文；截断按 Unicode 字符，不会切坏中文
 - 正文为空的结果在进入 RRF 合并前丢弃；如果某渠道全部为空，等同于该渠道没有结果
-- `limit` 是**每渠道**上限，最终结果数会随启用的渠道数增加
+- `limit` 是**每渠道**上限，最终结果数会随启用的渠道数增加；`fast` 模式按 `fast_channels` 串行兜底，条数由 `fast_limit` 控制（默认 10；显式传 `channels` 时不走串行兜底，`limit` 也不受 `fast_limit` 限制）
+- MCP 另有一套更小的输出预算，见上文 `[mcp]`；REST 不受影响
 
 ```toml
 [search]
@@ -213,9 +250,9 @@ github_token = "ghp_..."   # 可选；也可用 GITHUB_TOKEN 环境变量
 
 | 渠道 | 搜索 | 抓取 | 备注 |
 |---|---|---|---|
-| SearXNG | ✅ | ❌ | 免费、无 key；`fast` 模式 |
+| SearXNG | ✅ | ❌ | 免费、无 key；当前 Bing 引擎结果质量不可用，默认不参与 `fast` / `balanced` |
 | Exa | ✅ | ✅ | 单次最多 100 条；PDF/技术站可以，SPA/Reddit 不行 |
-| Tavily | ✅ | ✅ | 10 条/查询，`include_raw_content` 带正文（搜索正文按 `[search] max_content_chars` 截断） |
+| Tavily | ✅ | ✅ | 10 条/查询；`include_raw_content` 默认 `false`（搜索只回摘要，正文交给 `/fetch`），需要时可在 `[channels.tavily]` 打开 |
 | TinyFish | ✅ | ✅ | `X-API-Key`；默认未配置 |
 | Firecrawl | ✅ | ✅ | SPA（小黑盒）最强；抓正文较慢 |
 | grok | ✅ | ❌ | 直连 Responses API，仅兜底 |
@@ -242,7 +279,7 @@ account_ttl_secs = 600
 ## 开发
 
 ```bash
-cargo test                                  # 37 个单元测试，无网络依赖
+cargo test                                  # 47 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```

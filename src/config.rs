@@ -14,6 +14,8 @@ pub struct Config {
     #[serde(default)]
     pub search: SearchConfig,
     #[serde(default)]
+    pub mcp: McpConfig,
+    #[serde(default)]
     pub fetch: FetchConfig,
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,
@@ -71,6 +73,58 @@ impl Default for SearchConfig {
 
 fn default_search_max_content_chars() -> usize {
     8000
+}
+
+/// MCP 输出预算：MCP 客户端通常把工具结果一次性放进上下文，必须限制总大小。
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpConfig {
+    /// 整个 MCP 工具结果（所有 query 合计）的字符上限，超出按排名尾部丢弃
+    #[serde(default = "default_mcp_max_response_chars")]
+    pub max_response_chars: usize,
+    /// MCP web_search 每条结果的正文上限；需要全文时用 web_fetch
+    #[serde(default = "default_mcp_max_content_chars")]
+    pub max_content_chars: usize,
+    /// MCP web_fetch 每个页面的正文上限
+    #[serde(default = "default_mcp_max_fetch_content_chars")]
+    pub max_fetch_content_chars: usize,
+    /// MCP web_search 单次允许的 query 数
+    #[serde(default = "default_mcp_max_queries")]
+    pub max_queries: usize,
+    /// MCP web_search 未显式传 limit 时，每渠道使用的条数
+    #[serde(default = "default_mcp_default_limit")]
+    pub default_limit: usize,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            max_response_chars: default_mcp_max_response_chars(),
+            max_content_chars: default_mcp_max_content_chars(),
+            max_fetch_content_chars: default_mcp_max_fetch_content_chars(),
+            max_queries: default_mcp_max_queries(),
+            default_limit: default_mcp_default_limit(),
+        }
+    }
+}
+
+fn default_mcp_max_response_chars() -> usize {
+    50_000
+}
+
+fn default_mcp_max_content_chars() -> usize {
+    1500
+}
+
+fn default_mcp_max_fetch_content_chars() -> usize {
+    4000
+}
+
+fn default_mcp_max_queries() -> usize {
+    3
+}
+
+fn default_mcp_default_limit() -> usize {
+    8
 }
 
 /// 抓取行为：单页正文返回上限，以及"内容过短时继续尝试下一个渠道"的阈值。
@@ -244,6 +298,15 @@ pub struct RouterConfig {
     pub default_mode: String,
     #[serde(default = "default_limit")]
     pub default_limit: usize,
+    /// fast 模式每渠道条数上限
+    #[serde(default = "default_fast_limit")]
+    pub fast_limit: usize,
+    /// fast 模式的串行兜底顺序：第一个渠道有结果就用它，否则试下一个
+    #[serde(default = "default_fast_channels")]
+    pub fast_channels: Vec<String>,
+    /// fast 模式每个渠道的超时上限（秒），避免 WorkBuddy 卡住时等满全局超时
+    #[serde(default = "default_fast_timeout_secs")]
+    pub fast_timeout_secs: u64,
 }
 
 impl Default for RouterConfig {
@@ -251,6 +314,9 @@ impl Default for RouterConfig {
         Self {
             default_mode: default_mode(),
             default_limit: default_limit(),
+            fast_limit: default_fast_limit(),
+            fast_channels: default_fast_channels(),
+            fast_timeout_secs: default_fast_timeout_secs(),
         }
     }
 }
@@ -286,6 +352,9 @@ pub struct ChannelConfig {
     pub timeout_secs: u64,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// 仅 Tavily 使用：搜索时是否让上游附带正文（默认 false，正文交给 /fetch）
+    #[serde(default)]
+    pub include_raw_content: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,6 +453,21 @@ fn default_limit() -> usize {
     20
 }
 
+fn default_fast_limit() -> usize {
+    10
+}
+
+fn default_fast_channels() -> Vec<String> {
+    ["workbuddy", "tavily", "exa"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
+}
+
+fn default_fast_timeout_secs() -> u64 {
+    5
+}
+
 fn default_timeout() -> u64 {
     15
 }
@@ -417,6 +501,14 @@ bind = "0.0.0.0:3088"
         assert!(config.auth.keys.is_empty(), "没有 key 时全部拒绝");
         assert_eq!(config.router.default_mode, "balanced");
         assert_eq!(config.router.default_limit, 20);
+        assert_eq!(config.router.fast_limit, 10);
+        assert_eq!(config.router.fast_channels, ["workbuddy", "tavily", "exa"]);
+        assert_eq!(config.router.fast_timeout_secs, 5);
+        assert_eq!(config.mcp.max_response_chars, 50_000);
+        assert_eq!(config.mcp.max_content_chars, 1500);
+        assert_eq!(config.mcp.max_fetch_content_chars, 4000);
+        assert_eq!(config.mcp.max_queries, 3);
+        assert_eq!(config.mcp.default_limit, 8);
         assert!(config.cache.enabled);
         assert_eq!(config.cache.ttl_secs, 300);
         assert_eq!(config.search.max_content_chars, 8000);

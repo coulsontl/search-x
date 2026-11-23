@@ -11,7 +11,7 @@ use crate::channels::tavily::TavilyChannel;
 use crate::channels::tinyfish::TinyFishChannel;
 use crate::channels::workbuddy::{UpstreamWorkBuddyChannel, WorkBuddyChannel};
 use crate::channels::Channel;
-use crate::config::{AuthConfig, Config, ProxyConfig, WorkBuddyMode};
+use crate::config::{AuthConfig, Config, McpConfig, ProxyConfig, WorkBuddyMode};
 use crate::github_fetch::GithubFetcher;
 use crate::keypool::KeyPool;
 use crate::logger::SearchLogger;
@@ -21,6 +21,7 @@ use crate::workbuddy_accounts::WorkBuddyAccountStore;
 pub struct Runtime {
     pub router: Arc<Router>,
     pub auth: AuthConfig,
+    pub mcp: McpConfig,
 }
 
 const GROK_USER_AGENT: &str =
@@ -83,6 +84,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
                 cfg.base_url.clone(),
                 KeyPool::new(cfg.keys.clone(), cfg.strategy),
                 shared_client.clone(),
+                cfg.include_raw_content,
             )));
             timeouts.insert("tavily".into(), Duration::from_secs(cfg.timeout_secs));
         }
@@ -243,6 +245,9 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             timeouts,
             config.router.default_mode.clone(),
             config.router.default_limit,
+            config.router.fast_limit,
+            config.router.fast_channels.clone(),
+            config.router.fast_timeout_secs,
             config.search.max_content_chars,
             logger,
             cache,
@@ -252,6 +257,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             github,
         )),
         auth: config.auth.clone(),
+        mcp: config.mcp.clone(),
     })
 }
 

@@ -11,11 +11,24 @@ mode = "both"                # bearer | x_api_key | both | custom
 
 [router]
 default_mode = "balanced"   # fast | balanced | full
-default_limit = 20
+default_limit = 20          # balanced/full 每渠道条数
+fast_limit = 10             # fast 每渠道条数
+# fast 串行兜底顺序：WorkBuddy 有结果就用它；报错/0 条才试 Tavily，再试 Exa
+fast_channels = ["workbuddy", "tavily", "exa"]
+fast_timeout_secs = 5       # fast 每渠道超时上限，防止 WorkBuddy 卡住等满全局超时
 
 # 搜索结果单条正文上限（按 Unicode 字符截断；空正文结果会被过滤）
 [search]
 max_content_chars = 8000
+
+# MCP 输出预算：MCP 客户端通常把一次工具结果整体放进上下文
+# 超出 max_response_chars 时按排名从尾部丢弃，并在结果里标 truncated/omitted_results
+[mcp]
+max_response_chars = 50000  # 所有 query 合计的字符上限
+max_content_chars = 1500    # web_search 每条结果正文上限；全文用 web_fetch
+max_fetch_content_chars = 4000  # web_fetch 每个页面正文上限
+max_queries = 3             # web_search 单次 query 数上限
+default_limit = 8           # web_search 未传 limit 时每渠道条数
 
 # 搜索/抓取记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
 # 默认只记查询、耗时、渠道、结果数等元数据，不记返回内容
@@ -49,13 +62,14 @@ channel_order = ["firecrawl", "tavily", "exa", "tinyfish"]
 # url = "http://proxy.example.com:7890"
 # no_proxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 
-# 免费层：SearXNG，无 key，fast 模式唯一渠道
+# 免费层：SearXNG，无 key；当前 Bing 引擎结果质量不可用，默认编排不再包含它
+# 如需在 full 模式中使用，把 enabled 改为 true
 [channels.searxng]
 base_url = "http://127.0.0.1:8080"
-enabled = true
+enabled = false
 timeout_secs = 10
 
-# balanced 默认编排使用 Exa + Tavily（另两个是 searxng 与 workbuddy）
+# balanced 默认编排使用 Exa + Tavily + WorkBuddy
 [channels.exa]
 base_url = "https://api.exa.ai"
 keys = ["YOUR_EXA_KEY"]
@@ -67,6 +81,8 @@ base_url = "https://api.tavily.com"
 keys = ["YOUR_TAVILY_KEY"]
 strategy = "round_robin"
 timeout_secs = 15
+# 搜索时是否让 Tavily 附带正文；默认 false（更快、响应更小），正文交给 /fetch
+include_raw_content = false
 
 # 暂无 key，默认关闭
 [channels.tinyfish]

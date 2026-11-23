@@ -13,7 +13,7 @@ use crate::channels::{status_error, transport_error};
 use crate::model::{ChannelError, PageResult};
 
 const GITHUB_API: &str = "https://api.github.com";
-const USER_AGENT: &str = "search-x/0.6.4";
+const USER_AGENT: &str = concat!("search-x/", env!("CARGO_PKG_VERSION"));
 const MAX_COMMENTS: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

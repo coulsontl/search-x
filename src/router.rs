@@ -42,6 +42,9 @@ pub struct Router {
     timeouts: HashMap<String, Duration>,
     default_mode: String,
     default_limit: usize,
+    fast_limit: usize,
+    fast_channels: Vec<String>,
+    fast_timeout_secs: u64,
     search_max_content_chars: usize,
     logger: Option<Arc<SearchLogger>>,
     cache: Option<Arc<QueryCache>>,
@@ -59,6 +62,9 @@ impl Router {
         timeouts: HashMap<String, Duration>,
         default_mode: String,
         default_limit: usize,
+        fast_limit: usize,
+        fast_channels: Vec<String>,
+        fast_timeout_secs: u64,
         search_max_content_chars: usize,
         logger: Option<Arc<SearchLogger>>,
         cache: Option<Arc<QueryCache>>,
@@ -73,6 +79,9 @@ impl Router {
             timeouts,
             default_mode,
             default_limit,
+            fast_limit,
+            fast_channels,
+            fast_timeout_secs,
             search_max_content_chars,
             logger,
             cache,
@@ -80,6 +89,43 @@ impl Router {
             fetch_min_content_chars,
             fetch_channel_order,
             github,
+        }
+    }
+
+    pub fn default_mode(&self) -> &str {
+        &self.default_mode
+    }
+
+    pub fn log_mcp_search(
+        &self,
+        queries: &[String],
+        mode: &str,
+        limit: Option<usize>,
+        response_chars: usize,
+        truncated: bool,
+        omitted_results: usize,
+    ) {
+        if let Some(logger) = &self.logger {
+            logger.log_mcp_search(
+                queries,
+                mode,
+                limit,
+                response_chars,
+                truncated,
+                omitted_results,
+            );
+        }
+    }
+
+    pub fn log_mcp_fetch(
+        &self,
+        urls: &[String],
+        response_chars: usize,
+        truncated: bool,
+        omitted_pages: usize,
+    ) {
+        if let Some(logger) = &self.logger {
+            logger.log_mcp_fetch(urls, response_chars, truncated, omitted_pages);
         }
     }
 
@@ -107,12 +153,26 @@ impl Router {
     }
 
     pub async fn search(&self, request: SearchRequest) -> Vec<SearchResponse> {
+        self.search_with_source(request, "rest").await
+    }
+
+    pub async fn search_with_source(
+        &self,
+        request: SearchRequest,
+        source: &str,
+    ) -> Vec<SearchResponse> {
         let mode = request
             .mode
             .as_deref()
             .unwrap_or(&self.default_mode)
             .to_string();
-        let limit = request.limit.unwrap_or(self.default_limit).clamp(1, 100);
+        let mut limit = request.limit.unwrap_or(self.default_limit).clamp(1, 100);
+        // fast 不走并行渠道：按 fast_channels 串行尝试，第一个有结果的渠道胜出。
+        // 调用方显式传 channels 时仍按显式渠道并行，保持原有覆盖语义（含 limit）。
+        let fast_serial = mode == "fast" && request.channels.is_none();
+        if fast_serial {
+            limit = limit.min(self.fast_limit.max(1));
+        }
         let selected = self.select_channels(&mode, request.channels.as_deref());
         let cache_scope = match request.channels.as_deref() {
             Some(channels) => {
@@ -141,7 +201,11 @@ impl Router {
                     response.channel_elapsed_ms.clear();
                     return response;
                 }
-                let response = self.search_one(query, selected_ref, limit).await;
+                let response = if fast_serial {
+                    self.search_fast(query, limit).await
+                } else {
+                    self.search_one(query, selected_ref, limit).await
+                };
                 if let Some(cache) = &self.cache {
                     cache.put(cache_key, response.clone());
                 }
@@ -153,6 +217,7 @@ impl Router {
             // 缓存命中也要记录（轻量行），用于统计命中率。
             for response in &responses {
                 logger.log(
+                    source,
                     &mode,
                     limit,
                     bypass_cache,
@@ -165,6 +230,10 @@ impl Router {
     }
 
     pub async fn fetch(&self, request: FetchRequest) -> FetchResponse {
+        self.fetch_with_source(request, "rest").await
+    }
+
+    pub async fn fetch_with_source(&self, request: FetchRequest, source: &str) -> FetchResponse {
         let started = Instant::now();
         let mut selected: Vec<Arc<dyn Channel>> = self
             .channels
@@ -229,7 +298,7 @@ impl Router {
             elapsed_ms: started.elapsed().as_millis() as u64,
         };
         if let Some(logger) = &self.logger {
-            logger.log_fetch(&response);
+            logger.log_fetch(source, &response);
         }
         response
     }
@@ -295,10 +364,11 @@ impl Router {
 
     fn select_channels(&self, mode: &str, requested: Option<&[String]>) -> Vec<Arc<dyn Channel>> {
         let names: Vec<&str> = match mode {
-            "fast" => vec!["searxng"],
             "full" => self.channels.iter().map(|channel| channel.name()).collect(),
-            // 默认编排：四个国内可用渠道并发；WorkBuddy 的具体模式见 channels.workbuddy.mode
-            _ => vec!["searxng", "exa", "tavily", "workbuddy"],
+            // balanced 默认编排；fast 无显式 channels 时走 search_fast 的串行顺序，
+            // 这里的列表只用于 fast + 显式 channels 或未知 mode 的并行路径。
+            // SearXNG 当前结果质量不可用，默认编排不再包含它；需要时用 full 或显式 channels。
+            _ => vec!["exa", "tavily", "workbuddy"],
         };
         self.channels
             .iter()
@@ -392,6 +462,62 @@ impl Router {
         }
     }
 
+    /// fast 模式的串行兜底：按 `fast_channels` 顺序尝试，第一个有非空结果的渠道胜出。
+    /// 只有报错或 0 条结果才继续下一个渠道；有结果就不再调用后面的渠道。
+    async fn search_fast(&self, query: &str, limit: usize) -> SearchResponse {
+        let started = Instant::now();
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+        let mut used = Vec::new();
+        let mut channel_elapsed_ms = HashMap::new();
+
+        for name in &self.fast_channels {
+            let Some(channel) = self.channels.iter().find(|channel| channel.name() == name) else {
+                continue;
+            };
+            let call_started = Instant::now();
+            let timeout = self
+                .timeout_of(name)
+                .min(Duration::from_secs(self.fast_timeout_secs.max(1)));
+            let outcome = channel.search(query, limit, timeout).await;
+            channel_elapsed_ms.insert(name.clone(), call_started.elapsed().as_millis() as u64);
+            match outcome {
+                Ok(items) => {
+                    let items = non_empty_results(items);
+                    if !items.is_empty() {
+                        used.push(name.clone());
+                        results = rrf_merge(vec![items]);
+                        break;
+                    }
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+
+        if channel_elapsed_ms.is_empty() {
+            errors.push(ChannelError::new(
+                "fast",
+                "no_channels",
+                "fast 没有可用渠道",
+            ));
+        }
+
+        let mut results = move_searxng_last(results);
+        for item in &mut results {
+            item.content = truncate_chars(&item.content, self.search_max_content_chars);
+        }
+
+        SearchResponse {
+            query: query.to_string(),
+            results,
+            channels: used,
+            errors,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            cached: false,
+            channel_elapsed_ms,
+        }
+    }
+
     fn timeout_of(&self, name: &str) -> Duration {
         self.timeouts
             .get(name)
@@ -404,7 +530,7 @@ impl Router {
 mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -491,6 +617,89 @@ mod tests {
         }
     }
 
+    struct FailingChannel {
+        name: &'static str,
+        search_calls: Arc<AtomicUsize>,
+    }
+
+    impl FailingChannel {
+        fn new(name: &'static str) -> (Arc<Self>, Arc<AtomicUsize>) {
+            let search_calls = Arc::new(AtomicUsize::new(0));
+            let channel = Arc::new(Self {
+                name,
+                search_calls: search_calls.clone(),
+            });
+            (channel, search_calls)
+        }
+    }
+
+    #[async_trait]
+    impl Channel for FailingChannel {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn supports_fetch(&self) -> bool {
+            false
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _timeout: Duration,
+        ) -> Result<Vec<SearchResult>, ChannelError> {
+            self.search_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ChannelError::new(self.name, "mock_error", "mock failure"))
+        }
+
+        async fn fetch(
+            &self,
+            _urls: &[String],
+            _timeout: Duration,
+        ) -> Result<Vec<PageResult>, ChannelError> {
+            Err(ChannelError::new(self.name, "mock_error", "mock failure"))
+        }
+    }
+
+    /// 记录渠道实际收到的超时与条数，用于验证 fast 的独立超时与 limit 语义。
+    struct TimeoutRecordingChannel {
+        name: &'static str,
+        received_timeout: Arc<Mutex<Option<Duration>>>,
+        received_limit: Arc<Mutex<Option<usize>>>,
+        search_results: Vec<SearchResult>,
+    }
+
+    #[async_trait]
+    impl Channel for TimeoutRecordingChannel {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn supports_fetch(&self) -> bool {
+            false
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            limit: usize,
+            timeout: Duration,
+        ) -> Result<Vec<SearchResult>, ChannelError> {
+            *self.received_timeout.lock().unwrap() = Some(timeout);
+            *self.received_limit.lock().unwrap() = Some(limit);
+            Ok(self.search_results.clone())
+        }
+
+        async fn fetch(
+            &self,
+            _urls: &[String],
+            _timeout: Duration,
+        ) -> Result<Vec<PageResult>, ChannelError> {
+            Err(ChannelError::new("mock", "mock_error", "mock failure"))
+        }
+    }
+
     fn fetch_order(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
     }
@@ -526,6 +735,9 @@ mod tests {
             HashMap::new(),
             "balanced".to_string(),
             10,
+            10,
+            fetch_order(&["workbuddy", "tavily", "exa"]),
+            5,
             search_max_content_chars,
             None,
             cache,
@@ -735,5 +947,188 @@ mod tests {
         assert_eq!(response.pages[0].channel, "exa");
         assert_eq!(good_fetch_calls.load(Ordering::SeqCst), 1);
         assert_eq!(later_fetch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn fast_request() -> SearchRequest {
+        SearchRequest {
+            queries: vec!["test query".to_string()],
+            mode: Some("fast".to_string()),
+            channels: None,
+            limit: None,
+            no_cache: Some(true),
+        }
+    }
+
+    #[tokio::test]
+    async fn fast_uses_workbuddy_and_stops_before_fallbacks() {
+        let (workbuddy, workbuddy_calls, _) = MockChannel::new("workbuddy", "");
+        let (tavily, tavily_calls, _) = MockChannel::new("tavily", "");
+        let (exa, exa_calls, _) = MockChannel::new("exa", "");
+        let router = build_router(
+            vec![workbuddy, tavily, exa],
+            None,
+            10000,
+            500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
+        );
+
+        let response = router.search(fast_request()).await;
+        assert_eq!(response[0].channels, vec!["workbuddy"]);
+        assert_eq!(workbuddy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tavily_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(exa_calls.load(Ordering::SeqCst), 0);
+    }
+
+    fn fast_router_with_timeouts(
+        channel: Arc<dyn Channel>,
+        timeouts: HashMap<String, Duration>,
+    ) -> Router {
+        Router::new(
+            vec![channel],
+            Vec::new(),
+            timeouts,
+            "balanced".to_string(),
+            10,
+            10,
+            fetch_order(&["workbuddy"]),
+            5,
+            8000,
+            None,
+            None,
+            10000,
+            500,
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn recording_channel(
+        name: &'static str,
+        received_timeout: Arc<Mutex<Option<Duration>>>,
+        received_limit: Arc<Mutex<Option<usize>>>,
+    ) -> Arc<dyn Channel> {
+        Arc::new(TimeoutRecordingChannel {
+            name,
+            received_timeout,
+            received_limit,
+            search_results: vec![SearchResult {
+                title: "mock".to_string(),
+                url: format!("https://{name}.example.com/"),
+                content: "mock content".to_string(),
+                published_date: None,
+                channel: name.to_string(),
+            }],
+        })
+    }
+
+    #[tokio::test]
+    async fn fast_caps_channel_timeout_at_fast_timeout() {
+        let received = Arc::new(Mutex::new(None));
+        // 渠道未配置超时时默认 15 秒，fast 应压到 5 秒。
+        let router = fast_router_with_timeouts(
+            recording_channel("workbuddy", received.clone(), Arc::new(Mutex::new(None))),
+            HashMap::new(),
+        );
+
+        let response = router.search(fast_request()).await;
+        assert_eq!(response[0].channels, vec!["workbuddy"]);
+        assert_eq!(*received.lock().unwrap(), Some(Duration::from_secs(5)));
+    }
+
+    #[tokio::test]
+    async fn fast_keeps_shorter_channel_timeout() {
+        let received = Arc::new(Mutex::new(None));
+        // 渠道自身超时 2 秒比 fast 上限 5 秒更短，应保留 2 秒。
+        let timeouts = HashMap::from([("workbuddy".to_string(), Duration::from_secs(2))]);
+        let router = fast_router_with_timeouts(
+            recording_channel("workbuddy", received.clone(), Arc::new(Mutex::new(None))),
+            timeouts,
+        );
+
+        let response = router.search(fast_request()).await;
+        assert_eq!(response[0].channels, vec!["workbuddy"]);
+        assert_eq!(*received.lock().unwrap(), Some(Duration::from_secs(2)));
+    }
+
+    #[tokio::test]
+    async fn fast_caps_limit_only_for_serial_path() {
+        let received = Arc::new(Mutex::new(None));
+        // 默认 fast（未传 channels）把 limit 压到 fast_limit=10。
+        let router = fast_router_with_timeouts(
+            recording_channel("workbuddy", Arc::new(Mutex::new(None)), received.clone()),
+            HashMap::new(),
+        );
+        router
+            .search(SearchRequest {
+                queries: vec!["test query".to_string()],
+                mode: Some("fast".to_string()),
+                channels: None,
+                limit: Some(50),
+                no_cache: Some(true),
+            })
+            .await;
+        assert_eq!(*received.lock().unwrap(), Some(10));
+
+        // 显式 channels 覆盖 mode，limit 保持调用方传入的 50。
+        let explicit = Arc::new(Mutex::new(None));
+        let router = fast_router_with_timeouts(
+            recording_channel("workbuddy", Arc::new(Mutex::new(None)), explicit.clone()),
+            HashMap::new(),
+        );
+        router
+            .search(SearchRequest {
+                queries: vec!["test query".to_string()],
+                mode: Some("fast".to_string()),
+                channels: Some(vec!["workbuddy".to_string()]),
+                limit: Some(50),
+                no_cache: Some(true),
+            })
+            .await;
+        assert_eq!(*explicit.lock().unwrap(), Some(50));
+    }
+
+    #[tokio::test]
+    async fn fast_falls_back_to_tavily_then_stops() {
+        let (workbuddy, workbuddy_calls) = FailingChannel::new("workbuddy");
+        let (tavily, tavily_calls, _) = MockChannel::new("tavily", "");
+        let (exa, exa_calls, _) = MockChannel::new("exa", "");
+        let router = build_router(
+            vec![workbuddy, tavily, exa],
+            None,
+            10000,
+            500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
+        );
+
+        let response = router.search(fast_request()).await;
+        assert_eq!(response[0].channels, vec!["tavily"]);
+        assert_eq!(workbuddy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tavily_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exa_calls.load(Ordering::SeqCst), 0);
+        assert!(response[0]
+            .errors
+            .iter()
+            .any(|error| error.channel == "workbuddy"));
+    }
+
+    #[tokio::test]
+    async fn fast_falls_back_to_exa_when_workbuddy_and_tavily_fail() {
+        let (workbuddy, workbuddy_calls) = FailingChannel::new("workbuddy");
+        let (tavily, tavily_calls) = FailingChannel::new("tavily");
+        let (exa, exa_calls, _) = MockChannel::new("exa", "");
+        let router = build_router(
+            vec![workbuddy, tavily, exa],
+            None,
+            10000,
+            500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
+        );
+
+        let response = router.search(fast_request()).await;
+        assert_eq!(response[0].channels, vec!["exa"]);
+        assert_eq!(workbuddy_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tavily_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exa_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response[0].errors.len(), 2);
     }
 }

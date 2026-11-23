@@ -31,7 +31,7 @@ keypool.rs         多 key 轮询/冷却/禁用
 
 ```bash
 cargo build --release        # 构建
-cargo test                   # 单元测试（37 个，无网络依赖）
+cargo test                   # 单元测试（47 个，无网络依赖）
 cargo fmt --check            # 格式检查
 cargo clippy --all-targets -- -D warnings   # 静态检查（CI 同款）
 docker build -t search-x:dev .            # 构建镜像
@@ -61,12 +61,14 @@ curl -s http://127.0.0.1:3088/health
 | 融合排序 | RRF k=60；每个渠道内部顺序即排名；同页跨渠道分数累加 |
 | 去重 | URL 归一（忽略 scheme/www/末尾斜杠/fragment/跟踪参数）+ 最长正文/标题合并；未知 query 参数保留 |
 | 搜索正文 | 单条结果按 `[search] max_content_chars`（默认 8000）字符级截断；空正文结果在 RRF 前过滤 |
-| SearXNG | 结果只有摘要，统一排最后；JSON API 无条数参数 |
+| 路由模式 | `fast`=WorkBuddy→Tavily→Exa **串行兜底**（每渠道 10 条，第一个有结果即停；每渠道超时取 `min(channel.timeout, fast_timeout_secs=5)`）；`balanced`=Exa+Tavily+WorkBuddy 并行；`full`=所有已启用渠道；显式 `channels` 覆盖 mode，仍走并行 |
+| SearXNG | 结果只有摘要，统一排最后；JSON API 无条数参数；Bing 引擎当前结果质量不可用，默认不参与 `fast` / `balanced` |
+| MCP 输出 | 独立预算：`max_response_chars`（所有 query 合计，超出按 RRF 尾部丢弃）、`max_content_chars`（搜索正文）、`max_fetch_content_chars`（抓取正文）、`max_queries`、`default_limit`；超限返回 `truncated` / `omitted_results` / `omitted_pages` |
 | 缓存 | 进程内 TTL + 容量；key = query + 模式/渠道 + limit；`no_cache: true` 绕过读取但仍写回；命中时清空 `channel_elapsed_ms` |
-| 日志 | JSONL；**默认只记元数据**（`include_results=false`，不记返回内容）；记录 `limit`、`no_cache`、显式 `requested_channels`、`result_content_chars`（每条结果正文长度），便于解释缓存和内容质量；`channel_elapsed_ms` 记录每渠道耗时（含失败渠道）；`cached: true` 可统计命中率；`kind: "fetch"` 记录每 URL 的渠道与正文长度（不记正文） |
+| 日志 | JSONL；**默认只记元数据**（`include_results=false`，不记返回内容）；`source` 区分 `rest`/`mcp`；记录 `limit`、`no_cache`、显式 `requested_channels`、`result_content_chars`（每条结果正文长度），便于解释缓存和内容质量；`channel_elapsed_ms` 记录每渠道耗时（含失败渠道）；`cached: true` 可统计命中率；`kind: "fetch"` 记录每 URL 的渠道与正文长度（不记正文）；MCP 另写 `kind:"mcp"` 行，记录 `response_chars`、`truncated`、`omitted_results`/`omitted_pages` |
 | 抓取 | 多 URL 并行；单 URL 按 `[fetch] channel_order` 降级（默认 **Firecrawl → Tavily → Exa → TinyFish**），显式 `channels` 时按调用方顺序；内容 < `min_content_chars` 时继续尝试下一渠道取最长；GitHub issue/PR/release 先走 `api.github.com` 专项抽取，失败再回退 |
 | 认证 | 默认开启；无 key 时全部拒绝；支持 bearer / x-api-key / both / custom header |
-| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、查询 ≤10 条且 ≤4000 字符（REST 与 MCP 一致）、URL ≤10 个；`/health` 不返回版本；账号来源错误对客户端脱敏；GitHub 专项抓取 API 主机固定为 `api.github.com` |
+| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、REST 查询 ≤10 条、MCP 查询 ≤`mcp.max_queries`（默认 3）、单条 ≤4000 字符、URL ≤10 个；`/health` 不返回版本；账号来源错误对客户端脱敏；GitHub 专项抓取 API 主机固定为 `api.github.com` |
 | 凭据 | `WorkBuddyAccount` 刻意不实现 `Debug`；token 不进入错误响应、日志或缓存 key；export 模式 token 只在进程内缓存，不落盘；`github_token` 只进 `Authorization` 头，不写日志 |
 | 代理 | 全局 `[proxy]`，`no_proxy` 默认覆盖全部私网段 |
 
