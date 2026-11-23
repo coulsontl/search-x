@@ -31,7 +31,7 @@ keypool.rs         多 key 轮询/冷却/禁用
 
 ```bash
 cargo build --release        # 构建
-cargo test                   # 单元测试（47 个，无网络依赖）
+cargo test                   # 单元测试（66 个，无网络依赖）
 cargo fmt --check            # 格式检查
 cargo clippy --all-targets -- -D warnings   # 静态检查（CI 同款）
 docker build -t search-x:dev .            # 构建镜像

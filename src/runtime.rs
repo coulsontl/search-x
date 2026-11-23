@@ -32,7 +32,7 @@ fn build_http_client(
     proxy: Option<&ProxyConfig>,
     user_agent: Option<&str>,
 ) -> Result<reqwest::Client, String> {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(5));
     if let Some(user_agent) = user_agent {
         builder = builder.user_agent(user_agent);
     }
@@ -43,7 +43,6 @@ fn build_http_client(
             http_proxy = http_proxy.no_proxy(reqwest::NoProxy::from_string(&proxy.no_proxy));
         }
         builder = builder.proxy(http_proxy);
-        tracing::info!("出站代理: {}（no_proxy: {}）", proxy.url, proxy.no_proxy);
     }
     builder
         .build()
@@ -51,6 +50,9 @@ fn build_http_client(
 }
 
 pub fn build(config: &Config) -> Result<Runtime, String> {
+    if let Some(proxy) = &config.proxy {
+        tracing::info!("出站代理: {}（no_proxy: {}）", proxy.url, proxy.no_proxy);
+    }
     let shared_client = build_http_client(config.proxy.as_ref(), None)?;
     let grok_client = build_http_client(config.proxy.as_ref(), Some(GROK_USER_AGENT))?;
     let mut adapters: Vec<Arc<dyn Channel>> = Vec::new();
@@ -73,6 +75,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
                 cfg.base_url.clone(),
                 KeyPool::new(cfg.keys.clone(), cfg.strategy),
                 shared_client.clone(),
+                config.fetch.max_content_chars,
             )));
             timeouts.insert("exa".into(), Duration::from_secs(cfg.timeout_secs));
         }
@@ -108,6 +111,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
                 cfg.base_url.clone(),
                 KeyPool::new(cfg.keys.clone(), cfg.strategy),
                 shared_client.clone(),
+                cfg.scrape_content,
             )));
             timeouts.insert("firecrawl".into(), Duration::from_secs(cfg.timeout_secs));
         }
@@ -233,6 +237,10 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             "unset"
         }
     );
+    timeouts.insert(
+        "github".into(),
+        Duration::from_secs(config.fetch.github_timeout_secs),
+    );
     let github = Some(Arc::new(GithubFetcher::new(
         shared_client.clone(),
         github_token,
@@ -245,6 +253,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             timeouts,
             config.router.default_mode.clone(),
             config.router.default_limit,
+            config.router.balanced_channels.clone(),
             config.router.fast_limit,
             config.router.fast_channels.clone(),
             config.router.fast_timeout_secs,

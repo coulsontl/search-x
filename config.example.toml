@@ -12,6 +12,7 @@ mode = "both"                # bearer | x_api_key | both | custom
 [router]
 default_mode = "balanced"   # fast | balanced | full
 default_limit = 20          # balanced/full 每渠道条数
+balanced_channels = ["exa", "tavily", "workbuddy"]  # balanced 并行渠道列表
 fast_limit = 10             # fast 每渠道条数
 # fast 串行兜底顺序：WorkBuddy 有结果就用它；报错/0 条才试 Tavily，再试 Exa
 fast_channels = ["workbuddy", "tavily", "exa"]
@@ -26,9 +27,9 @@ max_content_chars = 8000
 [mcp]
 max_response_chars = 50000  # 所有 query 合计的字符上限
 max_content_chars = 1500    # web_search 每条结果正文上限；全文用 web_fetch
-max_fetch_content_chars = 4000  # web_fetch 每个页面正文上限
+max_fetch_content_chars = 10000 # web_fetch 单页正文上限（多页自动按 URL 数均分总预算）
 max_queries = 3             # web_search 单次 query 数上限
-default_limit = 8           # web_search 未传 limit 时每渠道条数
+default_limit = 8           # web_search 未传 limit 时每渠道条数（fast 仍使用 router.fast_limit）
 
 # 搜索/抓取记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
 # 默认只记查询、耗时、渠道、结果数等元数据，不记返回内容
@@ -56,6 +57,7 @@ channel_order = ["firecrawl", "tavily", "exa", "tinyfish"]
 # GitHub issue/PR/release 专项抓取使用的 token（可选；未配置时匿名，约 60 次/小时）
 # 环境变量 GITHUB_TOKEN 也支持，config 非空时优先；token 只用于 GitHub API 请求头
 # github_token = "ghp_..."
+github_timeout_secs = 15
 
 # 所有渠道共用同一出站 HTTP 代理（可选）；no_proxy 中的主机保持直连
 # [proxy]
@@ -97,6 +99,8 @@ base_url = "https://api.firecrawl.dev"
 keys = []
 enabled = false
 timeout_secs = 25
+# 搜索时是否顺带抓取每条结果的 markdown 正文（默认 true；关闭可明显提速并省 credits）
+scrape_content = true
 
 # 仅作为兜底，其他渠道全失败时才调用
 [channels.grok]

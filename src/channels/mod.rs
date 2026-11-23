@@ -49,9 +49,14 @@ pub(crate) fn transport_error(channel: &str, error: reqwest::Error) -> ChannelEr
 pub(crate) fn status_error(channel: &str, status: reqwest::StatusCode, body: &str) -> ChannelError {
     let code = match status.as_u16() {
         401 | 403 => "unauthorized",
-        429 => "rate_limited",
+        429 | 432 => "rate_limited",
         _ => "upstream",
     };
     let snippet: String = body.chars().take(200).collect();
     ChannelError::new(channel, code, format!("upstream {status}: {snippet}"))
+}
+
+/// 遇到凭据/限流/额度类状态码时，多 key 池可在单次请求内换下一把 key 重试一次。
+pub(crate) fn is_retryable_key_status(status: u16) -> bool {
+    matches!(status, 401 | 403 | 429 | 432)
 }

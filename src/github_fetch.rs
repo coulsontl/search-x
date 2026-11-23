@@ -124,7 +124,13 @@ impl GithubFetcher {
                 self.get_json(&reviews_url, timeout, "reviews"),
             );
             let main = main?;
-            let mut comments = parse_comments(&conversation?);
+            let mut comments = match conversation {
+                Ok(value) => parse_comments(&value),
+                Err(error) => {
+                    tracing::warn!("github PR 评论拉取失败，降级为空: {}", error.message);
+                    Vec::new()
+                }
+            };
             // 评审相关接口是补充信息，失败时降级为空，不影响主贴内容。
             if let Ok(value) = review_comments {
                 comments.extend(parse_comments(&value));
@@ -140,11 +146,15 @@ impl GithubFetcher {
                 self.get_json(&main_url, timeout, "issue"),
                 self.get_json(&comments_url, timeout, "comments"),
             );
-            Ok(issue_from_json(
-                &main?,
-                parse_comments(&conversation?),
-                false,
-            ))
+            let main = main?;
+            let comments = match conversation {
+                Ok(value) => parse_comments(&value),
+                Err(error) => {
+                    tracing::warn!("github issue 评论拉取失败，降级为空: {}", error.message);
+                    Vec::new()
+                }
+            };
+            Ok(issue_from_json(&main, comments, false))
         }
     }
 
@@ -218,6 +228,7 @@ struct GithubIssue {
     body: String,
     labels: Vec<String>,
     comments: Vec<GithubComment>,
+    total_issue_comments: Option<usize>,
     is_pr: bool,
 }
 
@@ -270,12 +281,21 @@ fn parse_target(raw: &str) -> Option<GithubTarget> {
             repo: repo.to_string(),
             tag: None,
         }),
-        ("releases", 5) if segments[3] == "tag" && valid_tag(segments[4]) => {
-            Some(GithubTarget::Release {
-                owner: owner.to_string(),
-                repo: repo.to_string(),
-                tag: Some(segments[4].to_string()),
-            })
+        ("releases", len)
+            if len >= 5
+                && segments[3] == "tag"
+                && segments[4..].iter().all(|segment| valid_tag(segment)) =>
+        {
+            let tag = segments[4..].join("/");
+            if tag.len() <= 200 {
+                Some(GithubTarget::Release {
+                    owner: owner.to_string(),
+                    repo: repo.to_string(),
+                    tag: Some(tag),
+                })
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -329,6 +349,10 @@ fn issue_from_json(value: &Value, comments: Vec<GithubComment>, is_pr: bool) -> 
             })
             .unwrap_or_default(),
         comments,
+        total_issue_comments: value
+            .get("comments")
+            .and_then(Value::as_u64)
+            .map(|count| count as usize),
         is_pr,
     }
 }
@@ -424,10 +448,18 @@ fn render_issue(raw: &GithubIssue) -> String {
         ));
     }
     if raw.comments.len() > MAX_COMMENTS {
-        out.push_str(&format!(
-            "_还有 {} 条评论_\n",
-            raw.comments.len() - MAX_COMMENTS
-        ));
+        let extra = raw
+            .total_issue_comments
+            .filter(|total| *total > MAX_COMMENTS)
+            .map(|total| total - MAX_COMMENTS);
+        match extra {
+            Some(remaining) if !raw.is_pr => {
+                out.push_str(&format!("_还有 {remaining} 条评论_\n"));
+            }
+            _ => {
+                out.push_str(&format!("_仅展示前 {MAX_COMMENTS} 条评论，其余已折叠_\n"));
+            }
+        }
     }
     out
 }
@@ -483,6 +515,14 @@ mod tests {
                 owner: "rust-lang".to_string(),
                 repo: "rust".to_string(),
                 tag: Some("v1.80.0".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_target("https://github.com/acme/mono/releases/tag/packages/core/v1.2.3"),
+            Some(GithubTarget::Release {
+                owner: "acme".to_string(),
+                repo: "mono".to_string(),
+                tag: Some("packages/core/v1.2.3".to_string()),
             })
         );
         assert_eq!(
@@ -580,12 +620,19 @@ mod tests {
             body: "body".to_string(),
             labels: vec!["bug".to_string()],
             comments,
+            total_issue_comments: Some(120),
             is_pr: true,
         };
         let rendered = render_issue(&issue);
         assert!(rendered.contains("**State:** closed (merged)"));
         assert!(rendered.contains("comment-29"));
         assert!(!rendered.contains("comment-30"));
-        assert!(rendered.contains("还有 1 条评论"));
+        assert!(rendered.contains("仅展示前 30 条评论"));
+
+        let non_pr = GithubIssue {
+            is_pr: false,
+            ..issue
+        };
+        assert!(render_issue(&non_pr).contains("还有 90 条评论"));
     }
 }

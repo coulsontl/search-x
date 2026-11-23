@@ -42,6 +42,7 @@ pub struct Router {
     timeouts: HashMap<String, Duration>,
     default_mode: String,
     default_limit: usize,
+    balanced_channels: Vec<String>,
     fast_limit: usize,
     fast_channels: Vec<String>,
     fast_timeout_secs: u64,
@@ -62,6 +63,7 @@ impl Router {
         timeouts: HashMap<String, Duration>,
         default_mode: String,
         default_limit: usize,
+        balanced_channels: Vec<String>,
         fast_limit: usize,
         fast_channels: Vec<String>,
         fast_timeout_secs: u64,
@@ -79,6 +81,7 @@ impl Router {
             timeouts,
             default_mode,
             default_limit,
+            balanced_channels,
             fast_limit,
             fast_channels,
             fast_timeout_secs,
@@ -94,6 +97,10 @@ impl Router {
 
     pub fn default_mode(&self) -> &str {
         &self.default_mode
+    }
+
+    pub fn fast_limit(&self) -> usize {
+        self.fast_limit
     }
 
     pub fn log_mcp_search(
@@ -173,6 +180,7 @@ impl Router {
         if fast_serial {
             limit = limit.min(self.fast_limit.max(1));
         }
+        let explicit_channels = request.channels.is_some();
         let selected = self.select_channels(&mode, request.channels.as_deref());
         let cache_scope = match request.channels.as_deref() {
             Some(channels) => {
@@ -204,10 +212,14 @@ impl Router {
                 let response = if fast_serial {
                     self.search_fast(query, limit).await
                 } else {
-                    self.search_one(query, selected_ref, limit).await
+                    self.search_one(query, selected_ref, explicit_channels, limit)
+                        .await
                 };
+                // 不缓存空结果或带错误的降级响应，避免瞬时故障污染后续 5 分钟的同查询。
                 if let Some(cache) = &self.cache {
-                    cache.put(cache_key, response.clone());
+                    if !response.results.is_empty() && response.errors.is_empty() {
+                        cache.put(cache_key, response.clone());
+                    }
                 }
                 response
             }
@@ -363,22 +375,25 @@ impl Router {
     }
 
     fn select_channels(&self, mode: &str, requested: Option<&[String]>) -> Vec<Arc<dyn Channel>> {
+        if let Some(requested) = requested {
+            // 显式指定 channels 时允许直接选中 fallback_only 渠道（例如 channels: ["exa", "grok"]）。
+            return self
+                .channels
+                .iter()
+                .chain(self.fallback.iter())
+                .filter(|channel| requested.iter().any(|name| name == channel.name()))
+                .cloned()
+                .collect();
+        }
         let names: Vec<&str> = match mode {
             "full" => self.channels.iter().map(|channel| channel.name()).collect(),
             // balanced 默认编排；fast 无显式 channels 时走 search_fast 的串行顺序，
-            // 这里的列表只用于 fast + 显式 channels 或未知 mode 的并行路径。
-            // SearXNG 当前结果质量不可用，默认编排不再包含它；需要时用 full 或显式 channels。
-            _ => vec!["exa", "tavily", "workbuddy"],
+            // 这里的列表只用于未知 mode 或默认 balanced 的并行路径。
+            _ => self.balanced_channels.iter().map(String::as_str).collect(),
         };
         self.channels
             .iter()
-            .filter(|channel| {
-                if let Some(requested) = requested {
-                    requested.iter().any(|name| name == channel.name())
-                } else {
-                    names.contains(&channel.name())
-                }
-            })
+            .filter(|channel| names.contains(&channel.name()))
             .cloned()
             .collect()
     }
@@ -387,9 +402,25 @@ impl Router {
         &self,
         query: &str,
         channels: &[Arc<dyn Channel>],
+        explicit_channels: bool,
         limit: usize,
     ) -> SearchResponse {
         let started = Instant::now();
+        if explicit_channels && channels.is_empty() {
+            return SearchResponse {
+                query: query.to_string(),
+                results: Vec::new(),
+                channels: Vec::new(),
+                errors: vec![ChannelError::new(
+                    "router",
+                    "no_channels",
+                    "指定的渠道均不可用",
+                )],
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                cached: false,
+                channel_elapsed_ms: HashMap::new(),
+            };
+        }
         let calls = channels.iter().map(|channel| {
             let channel = channel.clone();
             let query = query.to_string();
@@ -425,6 +456,10 @@ impl Router {
 
         if results.is_empty() && !self.fallback.is_empty() {
             for channel in &self.fallback {
+                // 如果显式 channels 已经跑过这个 fallback 渠道，不再重复调用。
+                if channels.iter().any(|entry| entry.name() == channel.name()) {
+                    continue;
+                }
                 let timeout = self.timeout_of(channel.name());
                 let call_started = Instant::now();
                 let outcome = channel.search(query, limit, timeout).await;
@@ -735,6 +770,7 @@ mod tests {
             HashMap::new(),
             "balanced".to_string(),
             10,
+            fetch_order(&["exa", "tavily", "workbuddy"]),
             10,
             fetch_order(&["workbuddy", "tavily", "exa"]),
             5,
@@ -989,6 +1025,7 @@ mod tests {
             timeouts,
             "balanced".to_string(),
             10,
+            fetch_order(&["exa", "tavily", "workbuddy"]),
             10,
             fetch_order(&["workbuddy"]),
             5,
@@ -1130,5 +1167,95 @@ mod tests {
         assert_eq!(tavily_calls.load(Ordering::SeqCst), 1);
         assert_eq!(exa_calls.load(Ordering::SeqCst), 1);
         assert_eq!(response[0].errors.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_or_empty_responses_are_not_cached() {
+        let (failing, failing_calls) = FailingChannel::new("exa");
+        let cache = Arc::new(QueryCache::new(60, 10));
+        let router = build_router(vec![failing], Some(cache.clone()), 10000, 500, Vec::new());
+
+        let first = router.search(search_request()).await;
+        let second = router.search(search_request()).await;
+        assert!(first[0].results.is_empty());
+        assert!(!second[0].cached);
+        assert_eq!(failing_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_channels_include_fallback_only_and_reject_unknown_without_fallback() {
+        let (exa, exa_calls, _) = MockChannel::new("exa", "");
+        let (grok, grok_calls, _) = MockChannel::new("grok", "");
+        let router = Router::new(
+            vec![exa],
+            vec![grok],
+            HashMap::new(),
+            "balanced".to_string(),
+            10,
+            fetch_order(&["exa", "tavily", "workbuddy"]),
+            10,
+            fetch_order(&["workbuddy", "tavily", "exa"]),
+            5,
+            8000,
+            None,
+            None,
+            10000,
+            500,
+            Vec::new(),
+            None,
+        );
+
+        let both = router
+            .search(SearchRequest {
+                channels: Some(vec!["exa".to_string(), "grok".to_string()]),
+                ..search_request()
+            })
+            .await;
+        assert_eq!(exa_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(grok_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(both[0].channels, vec!["exa", "grok"]);
+
+        let unknown = router
+            .search(SearchRequest {
+                channels: Some(vec!["nonexistent".to_string()]),
+                ..search_request()
+            })
+            .await;
+        assert_eq!(grok_calls.load(Ordering::SeqCst), 1);
+        assert!(unknown[0].results.is_empty());
+        assert_eq!(unknown[0].errors[0].code, "no_channels");
+    }
+
+    #[tokio::test]
+    async fn explicit_fallback_channel_is_not_called_twice_when_failing() {
+        let (grok, grok_calls) = FailingChannel::new("grok");
+        let router = Router::new(
+            Vec::new(),
+            vec![grok],
+            HashMap::new(),
+            "balanced".to_string(),
+            10,
+            fetch_order(&["exa"]),
+            10,
+            fetch_order(&["workbuddy"]),
+            5,
+            8000,
+            None,
+            None,
+            10000,
+            500,
+            Vec::new(),
+            None,
+        );
+
+        let response = router
+            .search(SearchRequest {
+                channels: Some(vec!["grok".to_string()]),
+                ..search_request()
+            })
+            .await;
+        assert_eq!(grok_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(response[0].errors.len(), 1);
     }
 }

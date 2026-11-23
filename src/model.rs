@@ -188,8 +188,10 @@ pub fn rrf_merge(per_channel: Vec<Vec<SearchResult>>) -> Vec<SearchResult> {
 }
 
 /// 合并同一 URL 的多来源结果：正文/标题取更长，发布日期取首个非空。
+/// 非 searxng 渠道合并进来时更新 channel，避免跨渠道共识结果被 move_searxng_last 拖到末尾。
 fn merge_item(existing: &mut SearchResult, item: SearchResult) {
-    if item.content.chars().count() > existing.content.chars().count() {
+    let longer_content = item.content.chars().count() > existing.content.chars().count();
+    if longer_content {
         existing.content = item.content;
     }
     if item.title.chars().count() > existing.title.chars().count() {
@@ -197,6 +199,9 @@ fn merge_item(existing: &mut SearchResult, item: SearchResult) {
     }
     if existing.published_date.is_none() {
         existing.published_date = item.published_date;
+    }
+    if existing.channel == "searxng" && item.channel != "searxng" {
+        existing.channel = item.channel;
     }
 }
 
@@ -221,9 +226,18 @@ fn normalize_url(raw: &str) -> String {
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
     let path = parsed.path().trim_end_matches('/');
-    match parsed.query() {
-        Some(query) if !query.is_empty() => format!("{host}{port}{path}?{query}"),
-        _ => format!("{host}{port}{path}"),
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if pairs.is_empty() {
+        format!("{host}{port}{path}")
+    } else {
+        pairs.sort();
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.extend_pairs(pairs);
+        let query = serializer.finish();
+        format!("{host}{port}{path}?{query}")
     }
 }
 
@@ -271,12 +285,56 @@ mod tests {
         ];
         let merged = rrf_merge(vec![results]);
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].channel, "searxng");
+        assert_eq!(merged[0].channel, "exa");
         assert_eq!(merged[0].title, "Longer and better title");
         assert_eq!(
             merged[0].content,
             "这是一段更长的正文内容，应该被保留下来。"
         );
+    }
+
+    #[test]
+    fn consensus_url_with_searxng_is_not_demoted() {
+        let searxng = vec![
+            result("Rust", "https://rust-lang.org/", "短摘要", "searxng"),
+            result("OnlyS", "https://only-s.example.com/", "s", "searxng"),
+        ];
+        let exa = vec![
+            result(
+                "Rust Programming Language",
+                "https://rust-lang.org/",
+                "完整的 Rust 介绍内容",
+                "exa",
+            ),
+            result("OnlyE", "https://only-e.example.com/", "e", "exa"),
+        ];
+        let ordered = move_searxng_last(rrf_merge(vec![searxng, exa]));
+        let urls: Vec<&str> = ordered.iter().map(|item| item.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://rust-lang.org/",
+                "https://only-e.example.com/",
+                "https://only-s.example.com/",
+            ]
+        );
+        assert_eq!(ordered[0].channel, "exa");
+    }
+
+    #[test]
+    fn normalizes_query_param_order() {
+        let results = vec![
+            result("A", "https://example.com/item?b=2&a=1", "short", "exa"),
+            result(
+                "A longer",
+                "https://example.com/item?a=1&b=2",
+                "much longer content",
+                "tavily",
+            ),
+        ];
+        let merged = rrf_merge(vec![results]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].content, "much longer content");
     }
 
     #[test]

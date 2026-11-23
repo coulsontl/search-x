@@ -51,7 +51,7 @@ fast_timeout_secs = 5       # fast 每渠道超时上限
 [mcp]
 max_response_chars = 50000  # MCP 单次结果总字符上限
 max_content_chars = 1500    # web_search 每条正文上限；全文用 web_fetch
-max_fetch_content_chars = 4000
+max_fetch_content_chars = 10000 # web_fetch 单页正文上限（多页自动按 URL 数均分总预算）
 max_queries = 3
 default_limit = 8
 
@@ -140,9 +140,9 @@ MCP 客户端通常把一次工具结果整体放进上下文，因此 MCP 输�
 [mcp]
 max_response_chars = 50000      # 所有 query 合计；超出按 RRF 排名从尾部丢弃
 max_content_chars = 1500        # web_search 每条正文上限，全文用 web_fetch
-max_fetch_content_chars = 4000  # web_fetch 每页正文上限
+max_fetch_content_chars = 10000 # web_fetch 单页正文上限（多页按 URL 数均分总预算）
 max_queries = 3                 # web_search 单次 query 数
-default_limit = 8               # web_search 未传 limit 时每渠道条数
+default_limit = 8               # web_search 未传 limit 时每渠道条数（fast 仍使用 router.fast_limit）
 ```
 
 超出预算时，结果里会带 `truncated: true`、`omitted_results`（搜索）或 `omitted_pages`（抓取）。REST `/search`、`/fetch` 不受这套预算影响，仍按 `[search]` / `[fetch]` 的配置返回。
@@ -279,7 +279,7 @@ account_ttl_secs = 600
 ## 开发
 
 ```bash
-cargo test                                  # 47 个单元测试，无网络依赖
+cargo test                                  # 66 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```

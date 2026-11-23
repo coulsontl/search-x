@@ -116,7 +116,7 @@ fn default_mcp_max_content_chars() -> usize {
 }
 
 fn default_mcp_max_fetch_content_chars() -> usize {
-    4000
+    10_000
 }
 
 fn default_mcp_max_queries() -> usize {
@@ -140,6 +140,9 @@ pub struct FetchConfig {
     /// GitHub issue/PR/release 专项抓取使用的 token；为空时回退环境变量 `GITHUB_TOKEN`
     #[serde(default)]
     pub github_token: String,
+    /// GitHub 专项抓取超时（秒）
+    #[serde(default = "default_timeout")]
+    pub github_timeout_secs: u64,
 }
 
 impl Default for FetchConfig {
@@ -149,6 +152,7 @@ impl Default for FetchConfig {
             min_content_chars: default_fetch_min_content_chars(),
             channel_order: default_fetch_channel_order(),
             github_token: String::new(),
+            github_timeout_secs: default_timeout(),
         }
     }
 }
@@ -167,6 +171,7 @@ impl std::fmt::Debug for FetchConfig {
             .field("min_content_chars", &self.min_content_chars)
             .field("channel_order", &self.channel_order)
             .field("github_token", &github_token)
+            .field("github_timeout_secs", &self.github_timeout_secs)
             .finish()
     }
 }
@@ -298,6 +303,9 @@ pub struct RouterConfig {
     pub default_mode: String,
     #[serde(default = "default_limit")]
     pub default_limit: usize,
+    /// balanced 模式的并行渠道列表
+    #[serde(default = "default_balanced_channels")]
+    pub balanced_channels: Vec<String>,
     /// fast 模式每渠道条数上限
     #[serde(default = "default_fast_limit")]
     pub fast_limit: usize,
@@ -314,6 +322,7 @@ impl Default for RouterConfig {
         Self {
             default_mode: default_mode(),
             default_limit: default_limit(),
+            balanced_channels: default_balanced_channels(),
             fast_limit: default_fast_limit(),
             fast_channels: default_fast_channels(),
             fast_timeout_secs: default_fast_timeout_secs(),
@@ -355,6 +364,9 @@ pub struct ChannelConfig {
     /// 仅 Tavily 使用：搜索时是否让上游附带正文（默认 false，正文交给 /fetch）
     #[serde(default)]
     pub include_raw_content: bool,
+    /// 仅 Firecrawl 使用：搜索时是否顺带抓取每条结果的 markdown 正文（默认 true；关闭可明显提速省 credits）
+    #[serde(default = "default_scrape_content")]
+    pub scrape_content: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -453,6 +465,13 @@ fn default_limit() -> usize {
     20
 }
 
+fn default_balanced_channels() -> Vec<String> {
+    ["exa", "tavily", "workbuddy"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
+}
+
 fn default_fast_limit() -> usize {
     10
 }
@@ -473,6 +492,10 @@ fn default_timeout() -> u64 {
 }
 
 fn default_enabled() -> bool {
+    true
+}
+
+fn default_scrape_content() -> bool {
     true
 }
 
@@ -501,12 +524,16 @@ bind = "0.0.0.0:3088"
         assert!(config.auth.keys.is_empty(), "没有 key 时全部拒绝");
         assert_eq!(config.router.default_mode, "balanced");
         assert_eq!(config.router.default_limit, 20);
+        assert_eq!(
+            config.router.balanced_channels,
+            ["exa", "tavily", "workbuddy"]
+        );
         assert_eq!(config.router.fast_limit, 10);
         assert_eq!(config.router.fast_channels, ["workbuddy", "tavily", "exa"]);
         assert_eq!(config.router.fast_timeout_secs, 5);
         assert_eq!(config.mcp.max_response_chars, 50_000);
         assert_eq!(config.mcp.max_content_chars, 1500);
-        assert_eq!(config.mcp.max_fetch_content_chars, 4000);
+        assert_eq!(config.mcp.max_fetch_content_chars, 10_000);
         assert_eq!(config.mcp.max_queries, 3);
         assert_eq!(config.mcp.default_limit, 8);
         assert!(config.cache.enabled);
@@ -514,6 +541,7 @@ bind = "0.0.0.0:3088"
         assert_eq!(config.search.max_content_chars, 8000);
         assert_eq!(config.fetch.max_content_chars, 10000);
         assert_eq!(config.fetch.min_content_chars, 500);
+        assert_eq!(config.fetch.github_timeout_secs, 15);
         assert_eq!(
             config.fetch.channel_order,
             ["firecrawl", "tavily", "exa", "tinyfish"]

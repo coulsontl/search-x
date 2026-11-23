@@ -1,4 +1,9 @@
 use std::net::IpAddr;
+use std::time::Duration;
+
+use futures::future::join_all;
+
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 只允许公网 http/https URL，拒绝私网、回环、链路本地、CGNAT、保留地址与内网域名。
 pub fn is_public_http_url(raw: &str) -> bool {
@@ -32,7 +37,7 @@ pub fn is_public_http_url(raw: &str) -> bool {
     true
 }
 
-/// 在字符串检查之后再做一次 DNS 解析：所有解析结果都必须是公网 IP。
+/// 在字符串检查之后再做一次 DNS 解析（带超时）：所有解析结果都必须是公网 IP。
 /// 用于 /fetch 把 URL 交给第三方抓取前，阻止 `127.0.0.1.nip.io` 这类解析到内网的域名。
 pub async fn is_public_http_url_resolved(raw: &str) -> bool {
     if !is_public_http_url(raw) {
@@ -51,7 +56,14 @@ pub async fn is_public_http_url_resolved(raw: &str) -> bool {
     if host.parse::<IpAddr>().is_ok() {
         return true;
     }
-    let resolved = tokio::net::lookup_host((host.as_str(), 80)).await;
+    let Ok(resolved) = tokio::time::timeout(
+        DNS_LOOKUP_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), 80)),
+    )
+    .await
+    else {
+        return false;
+    };
     match resolved {
         Ok(addresses) => {
             let mut resolved_any = false;
@@ -67,6 +79,20 @@ pub async fn is_public_http_url_resolved(raw: &str) -> bool {
     }
 }
 
+/// 并发校验一批 URL，返回第一个未通过校验的 URL；全部合法返回 None。
+pub async fn find_invalid_public_url(urls: &[String]) -> Option<String> {
+    let checks = urls.iter().map(|url| async move {
+        let valid = is_public_http_url_resolved(url).await;
+        (url, valid)
+    });
+    for (url, valid) in join_all(checks).await {
+        if !valid {
+            return Some(url.clone());
+        }
+    }
+    None
+}
+
 fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_ipv4(v4),
@@ -77,9 +103,18 @@ fn is_public_ip(ip: IpAddr) -> bool {
                 return is_public_ipv4(v4);
             }
             let segments = v6.segments();
+            let nat64 = segments[0] == 0x0064
+                && segments[1] == 0xff9b
+                && segments[2] == 0
+                && segments[3] == 0
+                && segments[4] == 0
+                && segments[5] == 0;
+            let documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
+                || nat64
+                || documentation
                 || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
                 || (segments[0] & 0xffc0) == 0xfe80) // fe80::/10 link local
         }
@@ -89,6 +124,9 @@ fn is_public_ip(ip: IpAddr) -> bool {
 fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
     let octets = v4.octets();
     let cgnat = octets[0] == 100 && (64..128).contains(&octets[1]);
+    let ietf_protocol = octets[0] == 192 && octets[1] == 0 && octets[2] == 0;
+    let benchmarking = octets[0] == 198 && (18..=19).contains(&octets[1]);
+    let reserved = octets[0] >= 240;
     !(v4.is_private()
         || v4.is_loopback()
         || v4.is_link_local()
@@ -96,7 +134,10 @@ fn is_public_ipv4(v4: std::net::Ipv4Addr) -> bool {
         || v4.is_unspecified()
         || v4.is_documentation()
         || v4.is_multicast()
-        || cgnat)
+        || cgnat
+        || ietf_protocol
+        || benchmarking
+        || reserved)
 }
 
 #[cfg(test)]
@@ -112,9 +153,14 @@ mod tests {
             "http://192.168.0.1/",
             "http://169.254.169.254/latest/meta-data/",
             "http://100.64.0.1/",
+            "http://192.0.0.1/",
+            "http://198.18.0.1/",
+            "http://240.0.0.1/",
             "http://[::1]/",
             "http://[::ffff:127.0.0.1]/",
             "http://[::ffff:10.0.0.1]/",
+            "http://[64:ff9b::127.0.0.1]/",
+            "http://[2001:db8::1]/",
             "http://[fd00::1]/",
             "http://foo.internal/",
             "file:///etc/passwd",

@@ -45,7 +45,10 @@ impl SearchLogger {
         requested_channels: Option<&[String]>,
         response: &SearchResponse,
     ) {
-        let Ok(_guard) = self.lock.lock() else { return };
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.rotate_if_needed();
         let mut record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
@@ -90,7 +93,10 @@ impl SearchLogger {
 
     /// 抓取日志只记录 URL、渠道与正文长度，不写正文内容。
     pub fn log_fetch(&self, source: &str, response: &FetchResponse) {
-        let Ok(_guard) = self.lock.lock() else { return };
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.rotate_if_needed();
         let record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
@@ -122,7 +128,10 @@ impl SearchLogger {
         truncated: bool,
         omitted_results: usize,
     ) {
-        let Ok(_guard) = self.lock.lock() else { return };
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.rotate_if_needed();
         let record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
@@ -147,7 +156,10 @@ impl SearchLogger {
         truncated: bool,
         omitted_pages: usize,
     ) {
-        let Ok(_guard) = self.lock.lock() else { return };
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.rotate_if_needed();
         let record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
@@ -183,7 +195,9 @@ impl SearchLogger {
         if meta.len() < self.max_bytes {
             return;
         }
-        let backup = self.path.with_extension("jsonl.1");
+        let mut backup = self.path.as_os_str().to_os_string();
+        backup.push(".1");
+        let backup = PathBuf::from(backup);
         let _ = fs::remove_file(&backup);
         let _ = fs::rename(&self.path, backup);
     }

@@ -113,6 +113,13 @@ async fn search(
         )
             .into_response();
     }
+    if request.queries.iter().any(|query| query.trim().is_empty()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "查询不能为空" })),
+        )
+            .into_response();
+    }
     if request
         .queries
         .iter()
@@ -144,15 +151,13 @@ async fn fetch(
         )
             .into_response();
     }
-    for url in &request.urls {
-        if !crate::url_guard::is_public_http_url_resolved(url).await {
-            tracing::warn!("拒绝非公网 URL: {url}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "仅允许公网 http/https URL" })),
-            )
-                .into_response();
-        }
+    if let Some(url) = crate::url_guard::find_invalid_public_url(&request.urls).await {
+        tracing::warn!("拒绝非公网 URL: {url}");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "仅允许公网 http/https URL" })),
+        )
+            .into_response();
     }
     let response = router.fetch(request).await;
     Json(response).into_response()

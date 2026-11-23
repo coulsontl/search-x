@@ -65,6 +65,8 @@ pub struct WorkBuddyAccountStore {
     provider: String,
     ttl: Duration,
     state: Mutex<StoreState>,
+    /// 合并并发刷新，避免冷启动或 TTL 到期时多 query 同时打爆导出接口。
+    reload_lock: tokio::sync::Mutex<()>,
 }
 
 impl WorkBuddyAccountStore {
@@ -86,27 +88,20 @@ impl WorkBuddyAccountStore {
                 loaded_at: None,
                 cursor: 0,
             }),
+            reload_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// 轮询取一个未过期账号；TTL 到期时重新调导出接口。
     /// 如果缓存里所有账号都已过期，距上次加载超过 30 秒会立刻重取一次，
     /// 以便及时拿到 agent2api 刷新后的 token。
-    pub async fn next_account(&self) -> Result<Option<WorkBuddyAccount>, String> {
-        let (stale, since_load) = {
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            (
-                state
-                    .loaded_at
-                    .is_none_or(|loaded_at| loaded_at.elapsed() >= self.ttl),
-                state.loaded_at.map(|loaded_at| loaded_at.elapsed()),
-            )
-        };
+    pub async fn next_account(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<WorkBuddyAccount>, String> {
+        let (stale, since_load) = self.freshness();
         if stale {
-            self.reload().await?;
+            self.reload_coalesced(timeout, false).await?;
         }
         let account = {
             let mut state = self
@@ -119,7 +114,7 @@ impl WorkBuddyAccountStore {
             && !stale
             && since_load.is_some_and(|elapsed| elapsed >= MIN_EXPIRED_RELOAD_INTERVAL)
         {
-            self.reload().await?;
+            self.reload_coalesced(timeout, true).await?;
             let mut state = self
                 .state
                 .lock()
@@ -129,15 +124,53 @@ impl WorkBuddyAccountStore {
         Ok(account)
     }
 
-    async fn reload(&self) -> Result<(), String> {
-        let accounts = self.load().await?;
+    fn freshness(&self) -> (bool, Option<Duration>) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            state
+                .loaded_at
+                .is_none_or(|loaded_at| loaded_at.elapsed() >= self.ttl),
+            state.loaded_at.map(|loaded_at| loaded_at.elapsed()),
+        )
+    }
+
+    async fn reload_coalesced(
+        &self,
+        timeout: Duration,
+        force_if_expired_interval: bool,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let _guard = tokio::time::timeout(timeout, self.reload_lock.lock())
+            .await
+            .map_err(|_| "等待 WorkBuddy 账号刷新超时".to_string())?;
+        // 拿到锁后二次检查：可能已有前一个并发请求完成了刷新。
+        let (stale, since_load) = self.freshness();
+        let should_reload = stale
+            || (force_if_expired_interval
+                && since_load.is_some_and(|elapsed| elapsed >= MIN_EXPIRED_RELOAD_INTERVAL));
+        if !should_reload {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("WorkBuddy 账号刷新超时".to_string());
+        }
+        let accounts = self.load(remaining).await?;
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let next_cursor = if accounts.is_empty() {
+            0
+        } else {
+            state.cursor % accounts.len()
+        };
         state.accounts = accounts;
         state.loaded_at = Some(Instant::now());
-        state.cursor = 0;
+        state.cursor = next_cursor;
         Ok(())
     }
 
@@ -150,15 +183,16 @@ impl WorkBuddyAccountStore {
         state.loaded_at = None;
     }
 
-    async fn load(&self) -> Result<Vec<WorkBuddyAccount>, String> {
+    async fn load(&self, timeout: Duration) -> Result<Vec<WorkBuddyAccount>, String> {
         if self.base_url.is_empty() {
             return Err("agent2api 地址为空".to_string());
         }
+        let effective_timeout = timeout.min(Duration::from_secs(EXPORT_TIMEOUT_SECS));
         let response = self
             .client
             .post(format!("{}/api/accounts/export-files", self.base_url))
             .bearer_auth(&self.api_key)
-            .timeout(Duration::from_secs(EXPORT_TIMEOUT_SECS))
+            .timeout(effective_timeout)
             .json(&json!({ "provider": self.provider }))
             .send()
             .await
@@ -363,5 +397,57 @@ mod tests {
         assert!(parse_export_response(&empty, "workbuddy").is_err());
         let failed = json!({"success": false});
         assert!(parse_export_response(&failed, "workbuddy").is_err());
+    }
+
+    #[tokio::test]
+    async fn coalesces_concurrent_cold_start_reloads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use axum::{routing::post, Json, Router as AxumRouter};
+        use futures::future::join_all;
+
+        let export_calls = Arc::new(AtomicUsize::new(0));
+        let counter = export_calls.clone();
+        let app = AxumRouter::new().route(
+            "/api/accounts/export-files",
+            post(move || {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    Json(json!({
+                        "success": true,
+                        "data": {
+                            "files": [
+                                {"content": {"accessToken": "token-a", "enabled": true}},
+                                {"content": {"accessToken": "token-b", "enabled": true}}
+                            ]
+                        }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let store = Arc::new(super::WorkBuddyAccountStore::new(
+            reqwest::Client::new(),
+            format!("http://{addr}"),
+            "k",
+            "workbuddy",
+            600,
+        ));
+        let tasks = (0..5).map(|_| {
+            let store = store.clone();
+            async move { store.next_account(Duration::from_secs(5)).await.unwrap() }
+        });
+        let accounts = join_all(tasks).await;
+        assert!(accounts.iter().all(Option::is_some));
+        assert_eq!(export_calls.load(Ordering::SeqCst), 1);
     }
 }
