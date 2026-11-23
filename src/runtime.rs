@@ -9,9 +9,10 @@ use crate::channels::grok::GrokChannel;
 use crate::channels::searxng::SearxngChannel;
 use crate::channels::tavily::TavilyChannel;
 use crate::channels::tinyfish::TinyFishChannel;
-use crate::channels::workbuddy::{DirectWorkBuddyChannel, WorkBuddyChannel};
+use crate::channels::workbuddy::{UpstreamWorkBuddyChannel, WorkBuddyChannel};
 use crate::channels::Channel;
 use crate::config::{AuthConfig, Config, ProxyConfig, WorkBuddyMode};
+use crate::github_fetch::GithubFetcher;
 use crate::keypool::KeyPool;
 use crate::logger::SearchLogger;
 use crate::router::Router;
@@ -112,7 +113,7 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
 
     if let Some(cfg) = &config.channels.workbuddy {
         if cfg.enabled {
-            // agent2api 通道同时是 direct 模式的回退。
+            // agent2api 通道同时是 export 模式的回退。
             let agent2api: Option<Arc<dyn Channel>> = if cfg.base_url.trim().is_empty() {
                 None
             } else {
@@ -129,28 +130,33 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
                         tracing::warn!("workbuddy 处于 agent2api 模式但 base_url 为空，渠道未启用")
                     }
                 },
-                WorkBuddyMode::Direct => {
-                    let accounts = Arc::new(WorkBuddyAccountStore::new(
-                        &cfg.db_path,
-                        &cfg.key_path,
-                        cfg.provider.clone(),
-                        cfg.account_ttl_secs,
-                    ));
-                    if agent2api.is_none() {
-                        tracing::warn!("workbuddy direct 模式没有配置 agent2api 回退通道");
+                WorkBuddyMode::Export => {
+                    if cfg.base_url.trim().is_empty() {
+                        tracing::warn!("workbuddy export 模式缺少 base_url，渠道未启用");
+                    } else {
+                        let accounts = Arc::new(WorkBuddyAccountStore::new(
+                            shared_client.clone(),
+                            cfg.base_url.clone(),
+                            cfg.api_key.clone(),
+                            cfg.provider.clone(),
+                            cfg.account_ttl_secs,
+                        ));
+                        if agent2api.is_none() {
+                            tracing::warn!("workbuddy export 模式没有配置 agent2api 回退通道");
+                        }
+                        tracing::info!(
+                            "workbuddy export 模式: provider={} max_results={} api={}/api/accounts/export-files",
+                            cfg.provider,
+                            cfg.max_results.clamp(1, 10),
+                            cfg.base_url.trim_end_matches('/')
+                        );
+                        adapters.push(Arc::new(UpstreamWorkBuddyChannel::new(
+                            shared_client.clone(),
+                            accounts,
+                            cfg.max_results,
+                            agent2api,
+                        )));
                     }
-                    tracing::info!(
-                        "workbuddy direct 模式: provider={} max_results={} db={}",
-                        cfg.provider,
-                        cfg.max_results.clamp(1, 10),
-                        cfg.db_path
-                    );
-                    adapters.push(Arc::new(DirectWorkBuddyChannel::new(
-                        shared_client.clone(),
-                        accounts,
-                        cfg.max_results,
-                        agent2api,
-                    )));
                 }
             }
             timeouts.insert("workbuddy".into(), Duration::from_secs(cfg.timeout_secs));
@@ -202,11 +208,33 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
         Some(Arc::new(SearchLogger::new(
             std::path::PathBuf::from(&config.log.path),
             config.log.max_size_mb,
+            config.log.include_results,
             config.log.content_chars,
         )))
     } else {
         None
     };
+
+    let github_token = if config.fetch.github_token.trim().is_empty() {
+        std::env::var("GITHUB_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    } else {
+        Some(config.fetch.github_token.trim().to_string())
+    };
+    tracing::info!(
+        "github 专项抓取: token={}",
+        if github_token.is_some() {
+            "set"
+        } else {
+            "unset"
+        }
+    );
+    let github = Some(Arc::new(GithubFetcher::new(
+        shared_client.clone(),
+        github_token,
+    )));
 
     Ok(Runtime {
         router: Arc::new(Router::new(
@@ -219,6 +247,8 @@ pub fn build(config: &Config) -> Result<Runtime, String> {
             cache,
             config.fetch.max_content_chars,
             config.fetch.min_content_chars,
+            config.fetch.channel_order.clone(),
+            github,
         )),
         auth: config.auth.clone(),
     })

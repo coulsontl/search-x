@@ -5,37 +5,54 @@ use std::sync::Mutex;
 
 use serde_json::json;
 
-use crate::model::SearchResponse;
+use crate::model::{FetchResponse, SearchResponse};
 
 pub struct SearchLogger {
     path: PathBuf,
     max_bytes: u64,
+    include_results: bool,
     content_chars: usize,
     lock: Mutex<()>,
 }
 
 impl SearchLogger {
-    pub fn new(path: PathBuf, max_size_mb: u64, content_chars: usize) -> Self {
+    pub fn new(
+        path: PathBuf,
+        max_size_mb: u64,
+        include_results: bool,
+        content_chars: usize,
+    ) -> Self {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
         Self {
             path,
             max_bytes: max_size_mb.saturating_mul(1024 * 1024),
+            include_results,
             content_chars,
             lock: Mutex::new(()),
         }
     }
 
-    /// 追加一条 JSONL 记录；超过上限时先把当前文件轮转为 `.1`。
-    /// 缓存命中只写轻量行（不重复写结果正文），并带 `cached: true`。
+    /// 追加一条搜索 JSONL 记录；超过上限时先把当前文件轮转为 `.1`。
+    /// 默认只写查询与统计字段，`include_results = true` 时才附结果明细。
     pub fn log(&self, mode: &str, response: &SearchResponse) {
         let Ok(_guard) = self.lock.lock() else { return };
         self.rotate_if_needed();
-        let results = if response.cached {
-            Vec::new()
-        } else {
-            response
+        let mut record = json!({
+            "ts": chrono::Utc::now().to_rfc3339(),
+            "kind": "search",
+            "query": response.query,
+            "mode": mode,
+            "elapsed_ms": response.elapsed_ms,
+            "channels": response.channels,
+            "channel_elapsed_ms": response.channel_elapsed_ms,
+            "cached": response.cached,
+            "result_count": response.results.len(),
+            "errors": response.errors,
+        });
+        if self.include_results && !response.cached {
+            record["results"] = json!(response
                 .results
                 .iter()
                 .map(|item| {
@@ -47,21 +64,36 @@ impl SearchLogger {
                         "content": truncate(&item.content, self.content_chars),
                     })
                 })
-                .collect::<Vec<_>>()
-        };
+                .collect::<Vec<_>>());
+        }
+        self.append(&record);
+    }
+
+    /// 抓取日志只记录 URL、渠道与正文长度，不写正文内容。
+    pub fn log_fetch(&self, response: &FetchResponse) {
+        let Ok(_guard) = self.lock.lock() else { return };
+        self.rotate_if_needed();
         let record = json!({
             "ts": chrono::Utc::now().to_rfc3339(),
-            "query": response.query,
-            "mode": mode,
+            "kind": "fetch",
             "elapsed_ms": response.elapsed_ms,
-            "channels": response.channels,
-            "channel_elapsed_ms": response.channel_elapsed_ms,
-            "cached": response.cached,
-            "result_count": response.results.len(),
-            "results": results,
+            "page_count": response.pages.len(),
+            "pages": response
+                .pages
+                .iter()
+                .map(|page| json!({
+                    "url": page.url,
+                    "channel": page.channel,
+                    "chars": page.content.chars().count(),
+                }))
+                .collect::<Vec<_>>(),
             "errors": response.errors,
         });
-        let Ok(line) = serde_json::to_string(&record) else {
+        self.append(&record);
+    }
+
+    fn append(&self, record: &serde_json::Value) {
+        let Ok(line) = serde_json::to_string(record) else {
             return;
         };
         if let Ok(mut file) = OpenOptions::new()
@@ -91,4 +123,80 @@ fn truncate(value: &str, limit: usize) -> String {
         return String::new();
     }
     value.chars().take(limit).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SearchLogger;
+    use crate::model::{FetchResponse, PageResult, SearchResponse, SearchResult};
+    use serde_json::Value;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_log_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("search-x-{tag}-{}.jsonl", uuid::Uuid::new_v4()))
+    }
+
+    fn sample_search_response() -> SearchResponse {
+        SearchResponse {
+            query: "test query".to_string(),
+            results: vec![SearchResult {
+                title: "title".to_string(),
+                url: "https://example.com/".to_string(),
+                content: "1234567890".to_string(),
+                published_date: None,
+                channel: "tavily".to_string(),
+            }],
+            channels: vec!["tavily".to_string()],
+            errors: Vec::new(),
+            elapsed_ms: 12,
+            cached: false,
+            channel_elapsed_ms: HashMap::from([("tavily".to_string(), 10)]),
+        }
+    }
+
+    #[test]
+    fn search_log_omits_results_by_default_and_truncates_when_enabled() {
+        let path = temp_log_path("search-metadata");
+        SearchLogger::new(path.clone(), 1, false, 200).log("balanced", &sample_search_response());
+        let line = fs::read_to_string(&path).unwrap();
+        let record: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record["kind"], "search");
+        assert_eq!(record["result_count"], 1);
+        assert!(record.get("results").is_none());
+        fs::remove_file(&path).unwrap();
+
+        let detailed_path = temp_log_path("search-detailed");
+        SearchLogger::new(detailed_path.clone(), 1, true, 5)
+            .log("balanced", &sample_search_response());
+        let line = fs::read_to_string(&detailed_path).unwrap();
+        let record: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record["results"][0]["content"], "12345");
+        fs::remove_file(&detailed_path).unwrap();
+    }
+
+    #[test]
+    fn fetch_log_keeps_only_page_metadata() {
+        let path = temp_log_path("fetch-metadata");
+        let response = FetchResponse {
+            pages: vec![PageResult {
+                url: "https://example.com/".to_string(),
+                title: "title".to_string(),
+                content: "abcdef".to_string(),
+                channel: "tavily".to_string(),
+            }],
+            errors: Vec::new(),
+            elapsed_ms: 12,
+        };
+        SearchLogger::new(path.clone(), 1, false, 200).log_fetch(&response);
+        let line = fs::read_to_string(&path).unwrap();
+        let record: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(record["kind"], "fetch");
+        assert_eq!(record["page_count"], 1);
+        assert_eq!(record["pages"][0]["channel"], "tavily");
+        assert_eq!(record["pages"][0]["chars"], 6);
+        assert!(record["pages"][0].get("content").is_none());
+        fs::remove_file(&path).unwrap();
+    }
 }

@@ -1,8 +1,4 @@
 FROM rust:1.97-slim AS builder
-# rusqlite bundled 需要用 C 编译器构建内置 SQLite
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libc6-dev \
-    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src

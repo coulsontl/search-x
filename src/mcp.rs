@@ -206,6 +206,13 @@ mod tests {
             None,
             10000,
             500,
+            vec![
+                "firecrawl".to_string(),
+                "tavily".to_string(),
+                "exa".to_string(),
+                "tinyfish".to_string(),
+            ],
+            None,
         )
     }
 

@@ -53,12 +53,18 @@ fn default_cache_max_entries() -> usize {
 }
 
 /// 抓取行为：单页正文返回上限，以及"内容过短时继续尝试下一个渠道"的阈值。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct FetchConfig {
     #[serde(default = "default_fetch_max_content_chars")]
     pub max_content_chars: usize,
     #[serde(default = "default_fetch_min_content_chars")]
     pub min_content_chars: usize,
+    /// 默认抓取渠道顺序；未列出的渠道排在后面。请求显式传 channels 时以请求顺序为准。
+    #[serde(default = "default_fetch_channel_order")]
+    pub channel_order: Vec<String>,
+    /// GitHub issue/PR/release 专项抓取使用的 token；为空时回退环境变量 `GITHUB_TOKEN`
+    #[serde(default)]
+    pub github_token: String,
 }
 
 impl Default for FetchConfig {
@@ -66,7 +72,27 @@ impl Default for FetchConfig {
         Self {
             max_content_chars: default_fetch_max_content_chars(),
             min_content_chars: default_fetch_min_content_chars(),
+            channel_order: default_fetch_channel_order(),
+            github_token: String::new(),
         }
+    }
+}
+
+/// 手写 Debug：只报告 token 是否配置，避免 `{:?}` 把凭据打进日志。
+impl std::fmt::Debug for FetchConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let github_token = if self.github_token.is_empty() {
+            "unset"
+        } else {
+            "set"
+        };
+        formatter
+            .debug_struct("FetchConfig")
+            .field("max_content_chars", &self.max_content_chars)
+            .field("min_content_chars", &self.min_content_chars)
+            .field("channel_order", &self.channel_order)
+            .field("github_token", &github_token)
+            .finish()
     }
 }
 
@@ -76,6 +102,13 @@ fn default_fetch_max_content_chars() -> usize {
 
 fn default_fetch_min_content_chars() -> usize {
     500
+}
+
+fn default_fetch_channel_order() -> Vec<String> {
+    ["firecrawl", "tavily", "exa", "tinyfish"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect()
 }
 
 /// 所有渠道的出站 HTTP 代理；no_proxy 里的主机（内网自建服务）保持直连。
@@ -98,7 +131,10 @@ pub struct LogConfig {
     pub path: String,
     #[serde(default = "default_log_max_mb")]
     pub max_size_mb: u64,
-    /// 每条结果正文写入日志的截断长度（0 = 不记录正文）
+    /// 是否把搜索结果明细写入日志；默认关闭，只记查询与统计字段
+    #[serde(default = "default_log_include_results")]
+    pub include_results: bool,
+    /// `include_results = true` 时每条结果正文的截断长度（0 = 不记录正文）
     #[serde(default = "default_log_content_chars")]
     pub content_chars: usize,
 }
@@ -109,6 +145,7 @@ impl Default for LogConfig {
             enabled: default_log_enabled(),
             path: default_log_path(),
             max_size_mb: default_log_max_mb(),
+            include_results: default_log_include_results(),
             content_chars: default_log_content_chars(),
         }
     }
@@ -124,6 +161,10 @@ fn default_log_path() -> String {
 
 fn default_log_max_mb() -> u64 {
     100
+}
+
+fn default_log_include_results() -> bool {
+    false
 }
 
 fn default_log_content_chars() -> usize {
@@ -258,25 +299,20 @@ pub struct GrokConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WorkBuddyConfig {
-    /// agent2api = 走 agent2api 搜索接口（token 由它维护）；direct = 直连上游并回退 agent2api
+    /// agent2api = 走 agent2api 搜索接口；export = 从 agent2api 导出接口取账号后直连上游并回退 agent2api
     #[serde(default)]
     pub mode: WorkBuddyMode,
-    /// agent2api 模式：搜索接口地址与 key；direct 模式下作为回退通道
+    /// agent2api 地址与 key；两种模式都用作回退，export 模式还用于调导出接口
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub api_key: String,
-    /// direct 模式：agent2api 的账号库与 AES 密钥（只读挂载）
-    #[serde(default = "default_workbuddy_db_path")]
-    pub db_path: String,
-    #[serde(default = "default_workbuddy_key_path")]
-    pub key_path: String,
     #[serde(default = "default_workbuddy_provider")]
     pub provider: String,
-    /// direct 模式：上游单次条数（服务端硬上限 10）
+    /// export 模式：上游单次条数（服务端硬上限 10）
     #[serde(default = "default_workbuddy_max_results")]
     pub max_results: usize,
-    /// direct 模式：账号缓存秒数，过期后重新读库
+    /// export 模式：账号缓存秒数，过期后重新调导出接口
     #[serde(default = "default_workbuddy_account_ttl_secs")]
     pub account_ttl_secs: u64,
     #[serde(default = "default_timeout")]
@@ -290,16 +326,8 @@ pub enum WorkBuddyMode {
     #[default]
     #[serde(rename = "agent2api")]
     Agent2Api,
-    #[serde(rename = "direct")]
-    Direct,
-}
-
-fn default_workbuddy_db_path() -> String {
-    "/agent2api/agent2api.db".to_string()
-}
-
-fn default_workbuddy_key_path() -> String {
-    "/agent2api/account.key".to_string()
+    #[serde(rename = "export")]
+    Export,
 }
 
 fn default_workbuddy_provider() -> String {
@@ -372,7 +400,30 @@ bind = "0.0.0.0:3088"
         assert_eq!(config.cache.ttl_secs, 300);
         assert_eq!(config.fetch.max_content_chars, 10000);
         assert_eq!(config.fetch.min_content_chars, 500);
+        assert_eq!(
+            config.fetch.channel_order,
+            ["firecrawl", "tavily", "exa", "tinyfish"]
+        );
+        assert!(config.fetch.github_token.is_empty());
+        assert!(!config.log.include_results);
         assert!(config.proxy.is_none());
+    }
+
+    #[test]
+    fn fetch_debug_redacts_github_token() {
+        let config: Config = toml::from_str(
+            r#"
+[server]
+bind = "127.0.0.1:3088"
+
+[fetch]
+github_token = "ghp_secret_value"
+"#,
+        )
+        .unwrap();
+        let debug = format!("{:?}", config.fetch);
+        assert!(debug.contains("github_token: \"set\""));
+        assert!(!debug.contains("ghp_secret_value"));
     }
 
     #[test]

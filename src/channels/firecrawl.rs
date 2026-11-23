@@ -66,7 +66,10 @@ impl Channel for FirecrawlChannel {
             .await
             .map_err(|error| transport_error("firecrawl", error))?;
         if !status.is_success() {
-            self.keys.report_failure(&key, Some(status.as_u16()));
+            // 403 常表示目标站点不支持或套餐限制，不代表 key 失效，避免误禁用。
+            if status.as_u16() != 403 {
+                self.keys.report_failure(&key, Some(status.as_u16()));
+            }
             return Err(status_error("firecrawl", status, &text));
         }
         self.keys.report_success(&key);
@@ -133,7 +136,10 @@ impl Channel for FirecrawlChannel {
                 .await
                 .map_err(|error| transport_error("firecrawl", error))?;
             if !status.is_success() {
-                self.keys.report_failure(&key, Some(status.as_u16()));
+                // 403 常表示目标站点不支持或套餐限制，不代表 key 失效，避免误禁用。
+                if status.as_u16() != 403 {
+                    self.keys.report_failure(&key, Some(status.as_u16()));
+                }
                 return Err(status_error("firecrawl", status, &text));
             }
             self.keys.report_success(&key);

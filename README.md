@@ -2,12 +2,13 @@
 
 轻量级多渠道搜索聚合网关：一个 Rust 单二进制，同时提供 **MCP** 和 **REST** 接口。
 
-- 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（agent2api 或直连）
+- 渠道：SearXNG（免费）、Exa、Tavily、TinyFish、Firecrawl、grok（兜底）、WorkBuddy（agent2api / export）
 - 每个渠道支持**多个 key 轮询**与失败冷却，**base URL 可自定义**（便于走反代）
 - 三档路由：`fast` / `balanced` / `full`，并行调用、独立超时、失败降级
 - **RRF 融合排序** + URL 归一化去重（保留最长正文），SearXNG 摘要结果统一排最后
 - **查询缓存**（TTL + 容量上限，请求可传 `no_cache` 绕过）
 - **并行抓取**：多个 URL 同时抓，内容过短自动换渠道重试，正文按字符安全截断
+- **GitHub 专项抓取**：issue / PR / release 链接走 GitHub API（可选 token 提高限额，失败回退普通渠道）
 - 认证层：多个自定义 API key，支持 `Authorization: Bearer`、`X-API-Key` 或自定义 header
 - SSRF 防护、请求体/数量/长度限制；JSONL 搜索日志轮转；配置 `POST /reload` 热重载；可选全局出站代理
 
@@ -126,7 +127,7 @@ POST /mcp
 ```http
 GET /health
 ```
-无需认证，只返回 `{"status":"ok","version":"..."}`（不暴露渠道清单）。
+无需认证，只返回 `{"status":"ok"}`（不暴露版本号与渠道清单）。
 
 ### 配置热重载
 
@@ -141,20 +142,29 @@ Authorization: Bearer <api-key>
 每次搜索（REST 和 MCP）追加一行 JSONL：
 
 ```json
-{"ts":"2026-11-22T11:20:00Z","query":"...","mode":"balanced","elapsed_ms":1832,
+{"ts":"2026-11-22T11:20:00Z","kind":"search","query":"...","mode":"balanced","elapsed_ms":1832,
  "channels":["exa","tavily"],"channel_elapsed_ms":{"exa":1292,"tavily":1820},
- "cached":false,"result_count":19,"results":[...],"errors":[]}
+ "cached":false,"result_count":19,"errors":[]}
 ```
 
+- **默认只记元数据**：查询、模式、耗时、渠道、结果数、错误，不记录返回内容，日志体积小。需要排查结果质量时把 `include_results` 设为 `true`，才会附加 `results`（正文按 `content_chars` 截断）。
 - `channel_elapsed_ms`：每个渠道本次耗时（含失败渠道），用于定位慢渠道；缓存命中时为空。
-- `cached: true` 表示命中查询缓存：只写轻量行（`results` 为空），用于统计命中率，不重复写结果正文。
+- `cached: true` 表示命中查询缓存，用于统计命中率。
+
+抓取（REST `/fetch` 与 MCP `web_fetch`）也会追加 `kind: "fetch"` 的元数据行：记录每个 URL 实际使用的渠道与正文长度（`chars`），不记录正文：
+
+```json
+{"ts":"2026-11-22T11:21:00Z","kind":"fetch","elapsed_ms":1137,"page_count":1,
+ "pages":[{"url":"https://example.com/","channel":"tavily","chars":10000}],"errors":[]}
+```
 
 ```toml
 [log]
 enabled = true
 path = "logs/search.jsonl"
-max_size_mb = 100      # 超过上限把当前文件轮转为 logs/search.jsonl.1
-content_chars = 200    # 每条结果正文截断长度，0 = 不记正文
+max_size_mb = 100        # 超过上限把当前文件轮转为 logs/search.jsonl.1
+include_results = false  # true = 额外记录搜索结果明细（日志会明显变大）
+content_chars = 200      # include_results=true 时每条结果正文截断长度，0 = 不记正文
 ```
 
 ## grok key 自动导入
@@ -170,9 +180,18 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 
 ## 抓取行为
 
-- 多个 URL **并行**抓取；单个 URL 内部按渠道顺序降级（Exa → Tavily → Firecrawl → TinyFish）
+- 多个 URL **并行**抓取；单个 URL 内部默认按 `[fetch] channel_order` 降级，默认 **Firecrawl → Tavily → Exa → TinyFish**（Firecrawl 抓 SPA/长文最完整但较慢，Tavily 速度与正文较均衡，Exa 快但常只给 5000 字）；请求显式传 `channels` 时按调用方给出的顺序尝试，不受 `channel_order` 影响
+- **GitHub issue / PR / release 链接优先走 GitHub API 专项抓取**：issue/PR 会合并评论与 PR review，release 直接取 release notes；失败或内容为空时才回退普通渠道
+- `channels` 显式指定时，只有包含 `"github"` 才会启用 GitHub 专项抓取；例如 `{"urls":["https://github.com/o/r/issues/1"],"channels":["github"]}`
+- GitHub token 可选：配置文件 `[fetch] github_token` 或环境变量 `GITHUB_TOKEN`（config 非空时优先）。匿名访问约 60 次/小时，配置 token 后限额更高且可读私有仓库
 - 如果某渠道返回的内容过短（低于 `[fetch] min_content_chars`，默认 500 字符，典型是 SPA 只抓到导航文本），会继续尝试下一个渠道，最终采用内容最长的结果
 - 返回正文按 `[fetch] max_content_chars`（默认 10000 字符）按字符截断（不会切坏中文）
+
+```toml
+[fetch]
+channel_order = ["firecrawl", "tavily", "exa", "tinyfish"]  # 默认抓取顺序，可自行调整
+github_token = "ghp_..."   # 可选；也可用 GITHUB_TOKEN 环境变量
+```
 
 ## 渠道说明
 
@@ -184,34 +203,30 @@ $CLAUDE_CONFIG_PATH 或 ~/.claude.json
 | TinyFish | ✅ | ✅ | `X-API-Key`；默认未配置 |
 | Firecrawl | ✅ | ✅ | SPA（小黑盒）最强；抓正文较慢 |
 | grok | ✅ | ❌ | 直连 Responses API，仅兜底 |
-| WorkBuddy | ✅ | ❌ | `mode = "agent2api"` 走 agent2api `/api/web-search/search`（上游固定 5 条）；`mode = "direct"` 旁路读取 agent2api 账号库直连上游（最多 10 条，失败自动回退 agent2api 并记日志） |
+| WorkBuddy | ✅ | ❌ | `mode = "agent2api"` 走 agent2api `/api/web-search/search`（上游固定 5 条）；`mode = "export"` 从 agent2api 导出接口取账号后直连（推荐，无需挂载数据库），最多 10 条，失败自动回退 agent2api 并记日志 |
 
-### WorkBuddy direct 模式
+### WorkBuddy export 模式（推荐）
 
-`direct` 模式不自己维护账号：它只读挂载 agent2api 的数据目录，按 TTL 读取并解密账号库里的 `accessToken` 直连 WorkBuddy 上游；token 刷新仍由 agent2api 负责，search-x 绝不调用 refresh 接口（避免 refresh token 轮换互踢）。
+`export` 模式不挂载 agent2api 数据库：它调用 agent2api 的账号导出接口 `POST /api/accounts/export-files`（`api_key` 需要管理权限），按 TTL 缓存返回的 `accessToken` 并直连 WorkBuddy 上游；刷新仍由 agent2api 负责，search-x 绝不调用 refresh 接口。
 
 ```toml
 [channels.workbuddy]
-mode = "direct"
-base_url = "http://agent2api.example.com:3065"   # 同时作为回退通道
+mode = "export"
+base_url = "http://agent2api.example.com:3065"
 api_key = "YOUR_AGENT2API_KEY"
-db_path = "/agent2api/agent2api.db"
-key_path = "/agent2api/account.key"
 provider = "workbuddy"
 max_results = 10
 account_ttl_secs = 600
 ```
 
-容器需要把 agent2api 数据目录**只读**挂进来（必须整目录，带上 SQLite 的 `-wal`/`-shm`）：
+导出接口返回的账号包含明文 token，**只保存在进程内缓存，不写日志/不落盘**；`api_key` 等于 agent2api 管理权限，需妥善保管。
 
-```bash
--v /path/to/agent2api:/agent2api:ro
-```
+> 0.6.0 起已移除 `direct` 模式（不再支持旁路解密账号库）；旧配置请改为 `mode = "export"`，并删除 `db_path` / `key_path`。
 
 ## 开发
 
 ```bash
-cargo test                                  # 26 个单元测试，无网络依赖
+cargo test                                  # 36 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```
@@ -245,13 +260,14 @@ docker run -d --name search-x -p 127.0.0.1:3088:3088 \
 - **认证默认开启**：支持 `bearer` / `x_api_key` / `both` / `custom` header；key 比较为常量时间；空 key 一律拒绝。
 - **公开探活**只返回 `{"status":"ok"}`，不暴露版本号或渠道清单。
 - **`/fetch` SSRF 防护**：只允许公网 http/https；拒绝内网/回环/链路本地/CGNAT/保留地址与 `.local` 等内网域名；并对域名做一次 DNS 解析，**所有解析结果必须是公网 IP**（阻止 `127.0.0.1.nip.io` 这类绕过）。
-- **WorkBuddy direct 模式**：只读旁路读取 agent2api 账号库，绝不调用 refresh；账号库读取失败只写服务端日志，不把路径/系统错误回给客户端。
+- **WorkBuddy export 模式**：`api_key` 需要 agent2api 管理权限；导出的明文 token 只保存在进程内缓存，不写日志、不落盘；导出失败只向客户端返回「账号来源不可用」。
+- **GitHub 专项抓取**：token 只用于 `api.github.com` 的 `Authorization` 头，不写日志；其权限决定能读哪些私有仓库，公网部署请使用最小权限的只读 token。
 - **公网部署建议**：
   - 用 nginx/Caddy 反代并启用 TLS，只暴露 `/search`、`/fetch`、`/mcp`；`/reload` 建议仅内网可达；
   - 反代层加请求频率限制与请求体上限；
   - 容器只绑定内网地址（`-p 127.0.0.1:3088:3088` 或内网 IP），不要 `-p 0.0.0.0`；
   - 容器使用 `--read-only`、`--cap-drop=ALL`、`--security-opt=no-new-privileges`；
-  - direct 模式只需挂载 `agent2api.db`、`-wal`、`-shm`、`account.key` 四个文件的专用目录，不要挂载整个 agent2api 数据目录；
+  - export 模式不需要任何 agent2api 文件挂载；
   - 网关本身无文件读取接口：所有请求参数只能到达搜索/抓取渠道，不能指定文件路径。
 
 环境变量：
@@ -260,4 +276,5 @@ docker run -d --name search-x -p 127.0.0.1:3088:3088 \
 |---|---|
 | `SEARCH_X_CONFIG` | 配置文件路径（默认 `config.toml`） |
 | `CLAUDE_CONFIG_PATH` | 可选；grok key 自动导入时读取的 Claude 配置路径（默认 `~/.claude.json`） |
+| `GITHUB_TOKEN` | 可选；GitHub 专项抓取 token，`[fetch] github_token` 为空时使用 |
 | `RUST_LOG` | 日志级别（默认 `search_x=info`） |

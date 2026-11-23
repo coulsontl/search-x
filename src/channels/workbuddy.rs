@@ -11,7 +11,7 @@ const WORKBUDDY_USER_AGENT: &str = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 const UPSTREAM_MAX_RESULTS: usize = 10;
 const MAX_ACCOUNT_ATTEMPTS: usize = 8;
 
-/// 经 `.3` 的 agent2api `/api/web-search/search`；需要把 workbuddy 加入其 selection.search。
+/// 经 agent2api 的 `/api/web-search/search`；需要把 workbuddy 加入其 selection.search。
 pub struct WorkBuddyChannel {
     client: reqwest::Client,
     base_url: String,
@@ -88,16 +88,16 @@ impl Channel for WorkBuddyChannel {
     }
 }
 
-/// 直连 WorkBuddy 上游：账号凭据旁路取自 agent2api 的账号库，
+/// 直连 WorkBuddy 上游：账号凭据来自 agent2api 导出接口，
 /// 每次请求轮询一个未过期账号，最多取 10 条；全部失败时回退 agent2api 并记日志。
-pub struct DirectWorkBuddyChannel {
+pub struct UpstreamWorkBuddyChannel {
     client: reqwest::Client,
     accounts: Arc<WorkBuddyAccountStore>,
     max_results: usize,
     fallback: Option<Arc<dyn Channel>>,
 }
 
-impl DirectWorkBuddyChannel {
+impl UpstreamWorkBuddyChannel {
     pub fn new(
         client: reqwest::Client,
         accounts: Arc<WorkBuddyAccountStore>,
@@ -236,7 +236,7 @@ impl DirectWorkBuddyChannel {
 }
 
 #[async_trait]
-impl Channel for DirectWorkBuddyChannel {
+impl Channel for UpstreamWorkBuddyChannel {
     fn name(&self) -> &'static str {
         "workbuddy"
     }
@@ -250,7 +250,7 @@ impl Channel for DirectWorkBuddyChannel {
         let max_results = self.max_results.min(limit.max(1));
         let mut last_error: Option<ChannelError> = None;
         for _ in 0..MAX_ACCOUNT_ATTEMPTS {
-            let account = match self.accounts.next_account(false) {
+            let account = match self.accounts.next_account().await {
                 Ok(Some(account)) => account,
                 Ok(None) => {
                     last_error.get_or_insert_with(|| {
@@ -260,9 +260,9 @@ impl Channel for DirectWorkBuddyChannel {
                 }
                 Err(error) => {
                     // 路径与系统错误只写服务端日志，不回给客户端。
-                    tracing::error!("workbuddy 账号库读取失败: {error}");
+                    tracing::error!("workbuddy 账号来源读取失败: {error}");
                     last_error.get_or_insert_with(|| {
-                        ChannelError::new("workbuddy", "store", "WorkBuddy 账号库不可用")
+                        ChannelError::new("workbuddy", "store", "WorkBuddy 账号来源不可用")
                     });
                     break;
                 }
@@ -275,7 +275,7 @@ impl Channel for DirectWorkBuddyChannel {
                 Ok(_) => {}
                 Err(error) => {
                     if error.code == "unauthorized" {
-                        // token 可能刚被 agent2api 刷新，下一次取号会重读库。
+                        // token 可能刚被 agent2api 刷新，下一次取号会重调导出接口。
                         self.accounts.invalidate();
                     }
                     last_error = Some(error);
@@ -293,7 +293,7 @@ impl Channel for DirectWorkBuddyChannel {
             }
             None => Err(ChannelError::new(
                 "workbuddy",
-                "direct_failed",
+                "upstream_failed",
                 format!("WorkBuddy 直连失败：{reason}"),
             )),
         }

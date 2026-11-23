@@ -48,6 +48,7 @@
 
 - **现象**：小黑盒只返回 322 字导航文本，`/fetch` 第一个渠道成功即停止，Firecrawl 根本没机会抓正文。
 - **解决**：内容长度低于 `fetch.min_content_chars`（默认 500）时继续尝试下一渠道，最终取最长结果；达到阈值才提前停止（避免不必要的付费调用）。
+- **2026-11-23 补充**：仅靠 500 字阈值还不够——排在前面的渠道只要超过 500 字就会提前停止，后面的渠道永远没机会。实测抓取完整度是 **Firecrawl > Tavily > Exa**（Firecrawl 抓 SPA/长文最完整，Tavily 速度与正文平衡，Exa 常只给 5000 字且 SPA 只剩导航文本）。默认顺序改为 **Firecrawl → Tavily → Exa → TinyFish**，并支持在 `[fetch] channel_order` 里自行调整；显式传 `channels` 时仍按调用方顺序。若希望 Tavily 只返回几千字时继续让 Firecrawl 补全，可提高 `min_content_chars`（例如 6000）。
 
 ### 8. Tavily 单条正文可能极长
 
@@ -98,10 +99,22 @@
 - **现象**：`http://127.0.0.1.nip.io/` 的主机名不是 IP 字面量，纯字符串检查会放行。
 - **解决**：`url_guard::is_public_http_url_resolved` 在字面量检查后再做一次 DNS 解析，**所有**解析结果必须是公网 IP；解析失败一律拒绝。REST `/fetch` 与 MCP `web_fetch` 统一走这个函数。
 
-### 17. WorkBuddy direct 模式：账号库挂载要收窄、WAL 要一起挂
+### 17. WorkBuddy export 模式：api_key 要管理权限，token 不能落盘
 
-- **背景**：direct 模式只读旁路读取 agent2api 的 `agent2api.db` 与 `account.key` 解密 token。
-- **坑 1**：直接挂载整个 agent2api 数据目录会把 `update-token.key`、插件和 wasm 缓存一起暴露给 search-x。应建专用目录，只放 `agent2api.db`、`agent2api.db-wal`、`agent2api.db-shm`、`account.key` 四个文件的硬链接。
-- **坑 2**：SQLite 处于 WAL 模式，只挂主库会读不到最新事务（token 刷新写回后可能看不到）。必须把 `-wal`/`-shm` 一起挂。
-- **坑 3**：硬链接在 `-wal`/`-shm` 被重建（agent2api 重启）后会指向旧 inode；表现是读到的账号数据变旧。重新执行链接命令即可，search-x 侧有 TTL + 401 重读 + agent2api 回退兜底。
-- **坑 4**：容器根文件系统设为 `--read-only` 后，SQLite 只读连接仍能工作（挂载目录本身是 ro），日志目录需单独 rw 挂载。
+- **现象**：用普通受限模型 key 调 `POST /api/accounts/export-files` 会返回 403 `management_access_denied`。
+- **解决**：`[channels.workbuddy].api_key` 必须是**不受限的模型 API key**（或面板管理员会话）；export 模式复用该 key 调导出接口与 agent2api 回退。
+- **安全**：导出接口返回明文 `accessToken`/`refreshToken`，能调它等于能导出该实例全部账号；search-x 只取 `accessToken` 放进程内缓存，不写日志、不落盘。**不要为了省事把整个 agent2api 数据目录挂进容器**（export 模式不需要任何 DB/密钥挂载）。
+- **验证**（2026-11-22）：`.3` 上 `channels:["workbuddy"]` 返回 10 条、232ms、0 错误；容器只剩 config/logs 两个挂载，`/agent2api` 不存在。
+
+### 18. GitHub 专项抓取：匿名限流 60 次/小时，token 不能进日志
+
+- **背景**：`/fetch` 对 `github.com/{owner}/{repo}/issues|pull/{n}` 和 `releases/tag|latest` 优先调用 `api.github.com`，失败或内容为空才回退普通渠道。
+- **坑 1**：匿名 GitHub API 约 **60 次/小时**；批量抓取或反复抓同一页会收到 403/429。配置 `[fetch] github_token` 或环境变量 `GITHUB_TOKEN`（config 非空优先）。
+- **坑 2**：token 只放 `Authorization: Bearer` 请求头；错误响应和日志不得出现 token，启动日志只记录 `token=set|unset`。
+- **坑 3**：只匹配固定 URL 形态；普通仓库首页、`/releases` 列表、`/releases/download/...` 资源下载仍走通用抓取，不要误以为 token 对所有 GitHub 页面生效。
+- **安全**：token 权限决定能读哪些私有仓库；公网实例使用最小权限只读 token，或只在受信客户端启用。
+
+### 19. Firecrawl 的 403 可能是站点不支持，不是 key 失效
+
+- **现象**：抓 Reddit 等站点时 Firecrawl 返回 403（提示不支持该站点）；旧逻辑把 403 当成 key 失效并永久禁用，后续所有 URL 都报 `no_key`。
+- **解决**：Firecrawl 渠道收到 403 时只返回错误、不调用 `report_failure`；401/429/5xx 与网络错误仍按原策略冷却/禁用。注意这不改变其它渠道对 403 的处理。

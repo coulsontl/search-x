@@ -6,11 +6,19 @@ use futures::future::join_all;
 
 use crate::cache::QueryCache;
 use crate::channels::Channel;
+use crate::github_fetch::GithubFetcher;
 use crate::logger::SearchLogger;
 use crate::model::{
     move_searxng_last, rrf_merge, ChannelError, FetchRequest, FetchResponse, PageResult,
     SearchRequest, SearchResponse, SearchResult,
 };
+
+fn fetch_priority(order: &[String], name: &str) -> usize {
+    order
+        .iter()
+        .position(|item| item == name)
+        .unwrap_or(order.len())
+}
 
 /// 按字符（而非字节）截断，避免切坏中文。
 fn truncate_chars(text: &str, limit: usize) -> String {
@@ -30,6 +38,8 @@ pub struct Router {
     cache: Option<Arc<QueryCache>>,
     fetch_max_content_chars: usize,
     fetch_min_content_chars: usize,
+    fetch_channel_order: Vec<String>,
+    github: Option<Arc<GithubFetcher>>,
 }
 
 impl Router {
@@ -44,6 +54,8 @@ impl Router {
         cache: Option<Arc<QueryCache>>,
         fetch_max_content_chars: usize,
         fetch_min_content_chars: usize,
+        fetch_channel_order: Vec<String>,
+        github: Option<Arc<GithubFetcher>>,
     ) -> Self {
         Self {
             channels,
@@ -55,11 +67,14 @@ impl Router {
             cache,
             fetch_max_content_chars,
             fetch_min_content_chars,
+            fetch_channel_order,
+            github,
         }
     }
 
     pub fn channel_status(&self) -> Vec<serde_json::Value> {
-        self.channels
+        let mut status: Vec<serde_json::Value> = self
+            .channels
             .iter()
             .chain(self.fallback.iter())
             .map(|channel| {
@@ -69,7 +84,15 @@ impl Router {
                     "fallback_only": self.fallback.iter().any(|entry| entry.name() == channel.name()),
                 })
             })
-            .collect()
+            .collect();
+        if self.github.is_some() {
+            status.push(serde_json::json!({
+                "channel": "github",
+                "supports_fetch": true,
+                "fallback_only": false,
+            }));
+        }
+        status
     }
 
     pub async fn search(&self, request: SearchRequest) -> Vec<SearchResponse> {
@@ -126,7 +149,7 @@ impl Router {
 
     pub async fn fetch(&self, request: FetchRequest) -> FetchResponse {
         let started = Instant::now();
-        let selected: Vec<Arc<dyn Channel>> = self
+        let mut selected: Vec<Arc<dyn Channel>> = self
             .channels
             .iter()
             .filter(|channel| channel.supports_fetch())
@@ -138,13 +161,29 @@ impl Router {
             })
             .cloned()
             .collect();
+        // 未指定 channels 时按抓取质量排序；显式指定时尊重调用方顺序。
+        match request.channels.as_deref() {
+            Some(names) => selected.sort_by_key(|channel| {
+                names
+                    .iter()
+                    .position(|name| name == channel.name())
+                    .unwrap_or(usize::MAX)
+            }),
+            None => selected
+                .sort_by_key(|channel| fetch_priority(&self.fetch_channel_order, channel.name())),
+        }
 
         // 多个 URL 并行抓取；单个 URL 内部仍按渠道顺序降级。
+        // `channels` 显式指定时，只有包含 "github" 才会启用 GitHub 专项抓取。
+        let allow_github = request
+            .channels
+            .as_deref()
+            .is_none_or(|names| names.iter().any(|name| name == "github"));
         let selected_ref = &selected;
         let futures = request
             .urls
             .iter()
-            .map(|url| self.fetch_one(url, selected_ref));
+            .map(|url| self.fetch_one(url, selected_ref, allow_github));
         let outcomes = join_all(futures).await;
 
         let mut pages = Vec::new();
@@ -167,11 +206,15 @@ impl Router {
                 }
             }
         }
-        FetchResponse {
+        let response = FetchResponse {
             pages,
             errors,
             elapsed_ms: started.elapsed().as_millis() as u64,
+        };
+        if let Some(logger) = &self.logger {
+            logger.log_fetch(&response);
         }
+        response
     }
 
     /// 单个 URL：按渠道顺序尝试；内容过短（如 SPA 只抓到 300 字导航文本）时继续尝试下一个，
@@ -180,9 +223,30 @@ impl Router {
         &self,
         url: &str,
         channels: &[Arc<dyn Channel>],
+        allow_github: bool,
     ) -> Result<Vec<PageResult>, Vec<ChannelError>> {
         let urls = [url.to_string()];
         let mut errors = Vec::new();
+        // GitHub issue/PR/release 走专用 GitHub API，内容通常比通用抓取完整；
+        // 只有专用抓取失败或为空时才回退到普通渠道。
+        if allow_github {
+            if let Some(github) = &self.github {
+                if github.matches(url) {
+                    match github.fetch(url, self.timeout_of("github")).await {
+                        Ok(page) if !page.content.trim().is_empty() => return Ok(vec![page]),
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                "github 专项抓取失败（{}），回退普通渠道: {}",
+                                error.code,
+                                error.message
+                            );
+                            errors.push(error);
+                        }
+                    }
+                }
+            }
+        }
         let mut best: Option<Vec<PageResult>> = None;
         let mut best_length = 0;
         for channel in channels {
@@ -216,7 +280,7 @@ impl Router {
         let names: Vec<&str> = match mode {
             "fast" => vec!["searxng"],
             "full" => self.channels.iter().map(|channel| channel.name()).collect(),
-            // 默认编排：四个国内可用渠道并发，WorkBuddy 走 agent2api（国内版）
+            // 默认编排：四个国内可用渠道并发；WorkBuddy 的具体模式见 channels.workbuddy.mode
             _ => vec!["searxng", "exa", "tavily", "workbuddy"],
         };
         self.channels
@@ -391,11 +455,16 @@ mod tests {
         }
     }
 
+    fn fetch_order(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
     fn build_router(
         channels: Vec<Arc<dyn Channel>>,
         cache: Option<Arc<QueryCache>>,
         max_chars: usize,
         min_chars: usize,
+        fetch_channel_order: Vec<String>,
     ) -> Router {
         Router::new(
             channels,
@@ -407,6 +476,8 @@ mod tests {
             cache,
             max_chars,
             min_chars,
+            fetch_channel_order,
+            None,
         )
     }
 
@@ -435,6 +506,7 @@ mod tests {
             Some(Arc::new(QueryCache::new(60, 10))),
             10000,
             500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
         );
 
         let first = router.search(search_request()).await;
@@ -466,7 +538,13 @@ mod tests {
     async fn fetch_prefers_longer_content_and_truncates() {
         let (short, _, short_fetch_calls) = MockChannel::new("exa", &"短".repeat(100));
         let (long, _, long_fetch_calls) = MockChannel::new("firecrawl", &"长".repeat(5000));
-        let router = build_router(vec![short, long], None, 2000, 500);
+        let router = build_router(
+            vec![short, long],
+            None,
+            2000,
+            500,
+            fetch_order(&["exa", "firecrawl"]),
+        );
 
         let response = router
             .fetch(FetchRequest {
@@ -482,10 +560,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_uses_configured_channel_order() {
+        let (exa, _, exa_fetch_calls) = MockChannel::new("exa", &"e".repeat(1000));
+        let (firecrawl, _, firecrawl_fetch_calls) =
+            MockChannel::new("firecrawl", &"f".repeat(1000));
+        let router = build_router(
+            vec![exa, firecrawl],
+            None,
+            10000,
+            500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
+        );
+
+        let response = router
+            .fetch(FetchRequest {
+                urls: vec!["https://example.com/".to_string()],
+                channels: None,
+            })
+            .await;
+        assert_eq!(response.pages[0].channel, "firecrawl");
+        assert_eq!(firecrawl_fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(exa_fetch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn fetch_prefers_tavily_and_respects_explicit_channel_order() {
+        let (exa, _, exa_fetch_calls) = MockChannel::new("exa", &"e".repeat(1000));
+        let (tavily, _, tavily_fetch_calls) = MockChannel::new("tavily", &"t".repeat(1000));
+        let router = build_router(
+            vec![exa, tavily],
+            None,
+            10000,
+            500,
+            fetch_order(&["firecrawl", "tavily", "exa", "tinyfish"]),
+        );
+
+        let default_response = router
+            .fetch(FetchRequest {
+                urls: vec!["https://example.com/".to_string()],
+                channels: None,
+            })
+            .await;
+        assert_eq!(default_response.pages[0].channel, "tavily");
+        assert_eq!(exa_fetch_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(tavily_fetch_calls.load(Ordering::SeqCst), 1);
+
+        let ordered_response = router
+            .fetch(FetchRequest {
+                urls: vec!["https://example.com/".to_string()],
+                channels: Some(vec!["exa".to_string(), "tavily".to_string()]),
+            })
+            .await;
+        assert_eq!(ordered_response.pages[0].channel, "exa");
+        assert_eq!(exa_fetch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(tavily_fetch_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn fetch_stops_when_content_long_enough() {
         let (good, _, good_fetch_calls) = MockChannel::new("exa", &"好".repeat(1000));
         let (later, _, later_fetch_calls) = MockChannel::new("firecrawl", &"后".repeat(5000));
-        let router = build_router(vec![good, later], None, 10000, 500);
+        let router = build_router(
+            vec![good, later],
+            None,
+            10000,
+            500,
+            fetch_order(&["exa", "firecrawl"]),
+        );
 
         let response = router
             .fetch(FetchRequest {

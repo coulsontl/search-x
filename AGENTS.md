@@ -14,7 +14,8 @@ server.rs          HTTP 路由 + API key 认证 + 请求限制
 mcp.rs             MCP JSON-RPC（initialize / tools/list / tools/call / ping）
 router.rs          路由核心：模式选择渠道、RRF 合并、查询缓存、/fetch 降级
 channels/          渠道适配器（每个文件一个渠道，实现 Channel trait）
-workbuddy_accounts.rs  WorkBuddy direct 模式：只读旁路解密 agent2api 账号库（不刷新 token）
+github_fetch.rs    GitHub issue/PR/release 专项抓取（api.github.com，可选 token）
+workbuddy_accounts.rs  WorkBuddy 账号来源：调 agent2api 导出接口（不刷新 token）
 model.rs           数据模型 + URL 归一/去重/RRF 算法
 cache.rs           进程内查询缓存（TTL + 容量）
 config.rs          config.toml 结构与默认值
@@ -30,7 +31,7 @@ keypool.rs         多 key 轮询/冷却/禁用
 
 ```bash
 cargo build --release        # 构建
-cargo test                   # 单元测试（18 个，无网络依赖）
+cargo test                   # 单元测试（36 个，无网络依赖）
 cargo fmt --check            # 格式检查
 cargo clippy --all-targets -- -D warnings   # 静态检查（CI 同款）
 docker build -t search-x:dev .            # 构建镜像
@@ -61,11 +62,11 @@ curl -s http://127.0.0.1:3088/health
 | 去重 | URL 归一（忽略 scheme/www/末尾斜杠/fragment/跟踪参数）+ 最长正文/标题合并；未知 query 参数保留 |
 | SearXNG | 结果只有摘要，统一排最后；JSON API 无条数参数 |
 | 缓存 | 进程内 TTL + 容量；key = query + 模式/渠道 + limit；`no_cache: true` 绕过读取但仍写回；命中时清空 `channel_elapsed_ms` |
-| 日志 | JSONL；`channel_elapsed_ms` 记录每渠道耗时（含失败渠道）；`cached: true` 命中写轻量行（results 为空），可统计命中率 |
-| 抓取 | 多 URL 并行；单 URL 按渠道顺序降级；内容 < `min_content_chars` 时继续尝试下一渠道取最长 |
+| 日志 | JSONL；**默认只记元数据**（`include_results=false`，不记返回内容）；`channel_elapsed_ms` 记录每渠道耗时（含失败渠道）；`cached: true` 可统计命中率；`kind: "fetch"` 记录每 URL 的渠道与正文长度（不记正文） |
+| 抓取 | 多 URL 并行；单 URL 按 `[fetch] channel_order` 降级（默认 **Firecrawl → Tavily → Exa → TinyFish**），显式 `channels` 时按调用方顺序；内容 < `min_content_chars` 时继续尝试下一渠道取最长；GitHub issue/PR/release 先走 `api.github.com` 专项抽取，失败再回退 |
 | 认证 | 默认开启；无 key 时全部拒绝；支持 bearer / x-api-key / both / custom header |
-| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、查询 ≤10 条且 ≤4000 字符（REST 与 MCP 一致）、URL ≤10 个；`/health` 不返回版本；direct 模式错误对客户端脱敏 |
-| 凭据 | `WorkBuddyAccount` 刻意不实现 `Debug`；token 不进入错误响应、日志或缓存 key；direct 只读挂载 4 个文件（db/wal/shm/account.key） |
+| 安全 | SSRF 白名单（拒绝私网/回环/链路本地/CGNAT/内网域名 + DNS 解析校验）、1MB body 上限、查询 ≤10 条且 ≤4000 字符（REST 与 MCP 一致）、URL ≤10 个；`/health` 不返回版本；账号来源错误对客户端脱敏；GitHub 专项抓取 API 主机固定为 `api.github.com` |
+| 凭据 | `WorkBuddyAccount` 刻意不实现 `Debug`；token 不进入错误响应、日志或缓存 key；export 模式 token 只在进程内缓存，不落盘；`github_token` 只进 `Authorization` 头，不写日志 |
 | 代理 | 全局 `[proxy]`，`no_proxy` 默认覆盖全部私网段 |
 
 ## 已知坑（详见 docs/PITFALLS.md）
@@ -75,8 +76,9 @@ curl -s http://127.0.0.1:3088/health
 3. **SearXNG 新版默认配置 `bing` 是 disabled**；用 `use_default_settings: true` 时需显式启用
 4. **Exa 对 SPA 可能只返回几百字导航文本**：fetch 必须有"内容过短继续降级"逻辑，否则 Firecrawl 永远没机会
 5. **Tavily 单条正文可达 10 万字符**：必须截断后再返回
-6. **WorkBuddy 经 agent2api 单次固定 5 条**；direct 模式直连上游最多 10 条（服务端硬上限），且同一账号有约 10 秒锁。direct 只读账号库、绝不 refresh（刷新权在 agent2api）
+6. **WorkBuddy 经 agent2api 单次固定 5 条**；export 模式直连上游最多 10 条（服务端硬上限），且同一账号有约 10 秒锁。两者都绝不 refresh（刷新权在 agent2api）；export 模式的 `api_key` 需要 agent2api 管理权限
 7. **URL 归一不能整串小写**：路径大小写敏感站点会被误合并
+8. **GitHub 匿名 API 限流约 60 次/小时**：`[fetch] github_token`（或 `GITHUB_TOKEN`）可提高限额并读私有仓库；token 失败/为空时专项抽取会回退普通渠道
 
 ## 配置与部署
 
@@ -95,7 +97,8 @@ docker run -d --name search-x \
   ghcr.io/<owner>/search-x:latest
 ```
 
-- direct 模式额外挂载**专用目录**（只含 `agent2api.db`、`agent2api.db-wal`、`agent2api.db-shm`、`account.key` 四个文件的硬链接），不要挂载整个 agent2api 数据目录
+- **export 模式不需要任何 agent2api 文件挂载**
+- GitHub 专项抓取 token 放 `[fetch] github_token`（600 权限的 config.toml）或容器环境变量 `GITHUB_TOKEN`；公网实例使用最小权限只读 token
 - 公网部署：反代 TLS + 限流，只暴露 `/search`、`/fetch`、`/mcp`；`/reload` 仅内网
 
 - `POST /reload` 重读配置（需认证），修改渠道/key/代理后无需重启；reload 失败只写日志，不把配置片段返回给客户端

@@ -13,12 +13,14 @@ mode = "both"                # bearer | x_api_key | both | custom
 default_mode = "balanced"   # fast | balanced | full
 default_limit = 20
 
-# 搜索记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
+# 搜索/抓取记录写 JSONL；超过 max_size_mb 自动轮转为 logs/search.jsonl.1
+# 默认只记查询、耗时、渠道、结果数等元数据，不记返回内容
 [log]
 enabled = true
 path = "logs/search.jsonl"
 max_size_mb = 100
-content_chars = 200         # 每条结果正文截断长度，0 = 不记正文
+include_results = false     # true = 额外记录搜索结果明细（日志会明显变大）
+content_chars = 200         # include_results=true 时每条结果正文截断长度，0 = 不记正文
 
 # 查询缓存：相同 query + 模式 + limit 在 TTL 内直接返回，命中时响应带 cached=true
 # 请求体传 "no_cache": true 可跳过缓存强制重新搜索
@@ -27,10 +29,16 @@ enabled = true
 ttl_secs = 300
 max_entries = 500
 
-# 抓取行为：多 URL 并行；单页正文返回上限；内容过短时继续尝试下一个渠道
+# 抓取行为：多 URL 并行；channel_order 控制默认降级顺序（未列出的渠道排最后）；
+# 请求显式传 channels 时以请求顺序为准；内容过短时继续尝试下一个渠道
 [fetch]
 max_content_chars = 10000
 min_content_chars = 500
+# Firecrawl 抓 SPA/正文最完整但较慢；Tavily 速度与正文平衡；Exa 快但常只给 5000 字
+channel_order = ["firecrawl", "tavily", "exa", "tinyfish"]
+# GitHub issue/PR/release 专项抓取使用的 token（可选；未配置时匿名，约 60 次/小时）
+# 环境变量 GITHUB_TOKEN 也支持，config 非空时优先；token 只用于 GitHub API 请求头
+# github_token = "ghp_..."
 
 # 所有渠道共用同一出站 HTTP 代理（可选）；no_proxy 中的主机保持直连
 # [proxy]
@@ -43,7 +51,7 @@ base_url = "http://127.0.0.1:8080"
 enabled = true
 timeout_secs = 10
 
-# 默认组合：Exa + Tavily
+# balanced 默认编排使用 Exa + Tavily（另两个是 searxng 与 workbuddy）
 [channels.exa]
 base_url = "https://api.exa.ai"
 keys = ["YOUR_EXA_KEY"]
@@ -79,19 +87,17 @@ enabled = false
 fallback_only = true
 timeout_secs = 30
 
-# agent2api = 走 agent2api 的搜索封装（token 由它维护，上游固定 5 条；需先把
-#   workbuddy 加入其 selection.search）
-# direct = 直连 WorkBuddy 上游（只读旁路 agent2api 的账号库取 token，最多 10 条；
-#   失败自动回退 agent2api 并记日志）。direct 需要把 agent2api 数据目录只读挂进容器。
+# WorkBuddy 有两种模式：
+#   agent2api = 走 agent2api 的搜索封装（token 由它维护，上游固定 5 条；
+#     需先把 workbuddy 加入其 selection.search）
+#   export = 从 agent2api 导出接口取 token 后直连上游，最多 10 条，
+#     失败自动回退 agent2api；无需挂载任何数据库（推荐）
 [channels.workbuddy]
-mode = "agent2api"
-base_url = "http://agent2api.example.com:3065"
-api_key = "YOUR_AGENT2API_KEY"
-# direct 模式专用
-db_path = "/agent2api/agent2api.db"
-key_path = "/agent2api/account.key"
-provider = "workbuddy"
-max_results = 10
-account_ttl_secs = 600
+mode = "agent2api"           # agent2api | export
+base_url = "http://agent2api.example.com:3065"   # agent2api 地址；export 模式兼作回退通道
+api_key = "YOUR_AGENT2API_KEY"                   # export 模式调导出接口，需要管理权限
+provider = "workbuddy"       # export：从导出结果中筛选的 provider
+max_results = 10             # export：上游单次条数，服务端硬上限 10
+account_ttl_secs = 600       # export：账号缓存秒数，过期后重新取
 enabled = false
 timeout_secs = 20

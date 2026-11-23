@@ -1,6 +1,7 @@
 mod cache;
 mod channels;
 mod config;
+mod github_fetch;
 mod keypool;
 mod logger;
 mod mcp;
