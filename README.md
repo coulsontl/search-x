@@ -279,7 +279,7 @@ account_ttl_secs = 600
 ## 开发
 
 ```bash
-cargo test                                  # 66 个单元测试，无网络依赖
+cargo test                                  # 67 个单元测试，无网络依赖
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings   # CI 同款检查
 ```

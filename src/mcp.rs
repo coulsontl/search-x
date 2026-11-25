@@ -47,11 +47,19 @@ fn tools(max_queries: usize) -> Vec<Value> {
     vec![
         json!({
             "name": "web_search",
-            "description": "Search the web through configured channels. Modes: fast (serial fallback: WorkBuddy -> Tavily -> Exa, up to 10 results), balanced (default: Exa + Tavily + WorkBuddy in parallel), full (all enabled channels). Pass 'channels' (e.g. exa, tavily, workbuddy, firecrawl, tinyfish, searxng, grok) to override the mode and use only the listed providers. Results are snippet-sized; use web_fetch for full page content.",
+            "description": format!(
+                "Search the web through configured channels (1-{max_queries} queries per call; split larger searches into multiple calls). Modes: fast (serial fallback: WorkBuddy -> Tavily -> Exa, up to 10 results), balanced (default: Exa + Tavily + WorkBuddy in parallel), full (all enabled channels). Pass 'channels' (e.g. exa, tavily, workbuddy, firecrawl, tinyfish, searxng, grok) to override the mode and use only the listed providers. Results are snippet-sized; use web_fetch for full page content."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "queries": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": max_queries },
+                    "queries": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "maxItems": max_queries,
+                        "description": format!("1-{max_queries} search queries per call.")
+                    },
                     "mode": { "type": "string", "enum": ["fast", "balanced", "full"] },
                     "channels": {
                         "type": "array",
@@ -674,5 +682,30 @@ mod tests {
         assert_eq!(dynamic_fetch_page_cap(1, 50_000, 10_000), 10_000);
         assert_eq!(dynamic_fetch_page_cap(2, 50_000, 10_000), 10_000);
         assert_eq!(dynamic_fetch_page_cap(10, 50_000, 10_000), 4_700);
+    }
+
+    #[tokio::test]
+    async fn tools_list_reflects_configured_max_queries() {
+        let mut config = test_config();
+        config.max_queries = 5;
+        let result = handle(
+            &test_router(),
+            &config,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        )
+        .await;
+        let web_search = &result["result"]["tools"][0];
+        let description = web_search["description"].as_str().unwrap();
+        assert!(description.contains("1-5 queries per call"));
+        assert_eq!(
+            web_search["inputSchema"]["properties"]["queries"]["maxItems"],
+            5
+        );
+        assert!(
+            web_search["inputSchema"]["properties"]["queries"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("1-5")
+        );
     }
 }
